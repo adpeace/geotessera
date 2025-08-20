@@ -22,6 +22,18 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely.geometry
+from shapely.geometry import box, shape
+from shapely.ops import transform
+import json
+import tempfile
+import shutil
+import pyproj
+import rasterio
+from rasterio.warp import calculate_default_transform, reproject
+from rasterio.enums import Resampling
+from rasterio.merge import merge
+from rasterio.mask import mask
+from rasterio.io import MemoryFile
 
 from .registry_utils import (
     get_block_coordinates,
@@ -1254,17 +1266,14 @@ class GeoTessera:
         # Convert to uint8 for TIFF export
         vis_data_uint8 = (vis_data * 255).astype(np.uint8)
 
-        # Get dimensions
+        # Get dimensions from data
         height, width = vis_data.shape[:2]
 
-        # Calculate geographic bounds (tiles are centered, covering 0.1 degrees)
-        lon_min = lon - 0.05
-        lat_min = lat - 0.05
-        lon_max = lon + 0.05
-        lat_max = lat + 0.05
-
-        # Create georeferencing transform
-        transform = from_bounds(lon_min, lat_min, lon_max, lat_max, width, height)
+        # Read geospatial metadata from the landmask GeoTIFF
+        landmask_path = self._fetch_landmask(lat, lon, progressbar=False)
+        with rasterio.open(landmask_path) as landmask_src:
+            src_transform = landmask_src.transform
+            src_crs = landmask_src.crs
 
         # Write the GeoTIFF
         with rasterio.open(
@@ -1275,8 +1284,8 @@ class GeoTessera:
             width=width,
             count=len(bands),  # Number of bands to write
             dtype="uint8",
-            crs="EPSG:4326",  # WGS84
-            transform=transform,
+            crs=src_crs,
+            transform=src_transform,
             compress="lzw",
         ) as dst:
             # Write RGB bands
@@ -1286,9 +1295,7 @@ class GeoTessera:
         print(f"Bands used: {bands}")
         print(f"Exported tile to {output_path}")
         print(f"Dimensions: {width}x{height} pixels")
-        print(
-            f"Geographic bounds: {lon_min:.4f}, {lat_min:.4f}, {lon_max:.4f}, {lat_max:.4f}"
-        )
+        print(f"CRS: {src_crs}")
 
         return output_path
 
@@ -1325,7 +1332,7 @@ class GeoTessera:
             ValueError: If no land mask tiles are found for the region.
 
         Note:
-            This is an internal method used by merge_embeddings_for_region().
+            This is an internal method used by mosaic_embeddings_for_region().
             Binary masks are automatically converted to visible grayscale
             (0 → 0, 1 → 255) for better visualization.
         """
@@ -1466,13 +1473,14 @@ class GeoTessera:
             # Clean up temporary files
             shutil.rmtree(temp_dir)
 
-    def merge_embeddings_for_region(
+    def mosaic_embeddings_for_region(
         self,
-        bounds: Tuple[float, float, float, float],
         output_path: str,
+        geometry: Union[gpd.GeoDataFrame, "shapely.geometry.BaseGeometry", str],
         target_crs: str = "EPSG:4326",
         bands: Optional[List[int]] = None,
         year: int = 2024,
+        clip_to_geometry: bool = True,
     ) -> str:
         """Create a seamless mosaic of Tessera embeddings for a geographic region.
 
@@ -1483,16 +1491,17 @@ class GeoTessera:
         UTM zones.
 
         The process:
-        1. Identifies all tiles intersecting the bounding box
+        1. Identifies all tiles intersecting the geometry
         2. Downloads embeddings and corresponding land masks
         3. Creates georeferenced temporary files using land mask CRS metadata
         4. Reprojects tiles to common coordinate system if needed
         5. Merges all tiles into seamless mosaic
+        6. Optionally clips to exact region geometry
 
         Args:
-            bounds: Region bounds as (min_lon, min_lat, max_lon, max_lat) in
-                    decimal degrees. Example: (-0.2, 51.4, 0.1, 51.6) for London.
             output_path: Filename for the output GeoTIFF mosaic.
+            geometry: A GeoDataFrame, Shapely geometry, or GeoJSON string defining
+                     the region. Must be in EPSG:4326.
             target_crs: Coordinate system for output. Default "EPSG:4326" (WGS84).
                        Use local projections (e.g., UTM) for accurate area measurements.
             bands: List of channel indices to include in output. If None (default),
@@ -1500,6 +1509,8 @@ class GeoTessera:
                    channels (e.g., [0,1,2] for specific band selection).
                    All indices must be in range 0-127.
             year: Year of embeddings to merge (2017-2024).
+            clip_to_geometry: Whether to clip output to exact region geometry.
+                            Default True.
 
         Returns:
             Path to the created mosaic GeoTIFF file.
@@ -1511,17 +1522,21 @@ class GeoTessera:
 
         Examples:
             >>> gt = GeoTessera()
-            >>> # Create full 128-band mosaic (default)
-            >>> gt.merge_embeddings_for_region(
-            ...     bounds=(-0.2, 51.4, 0.1, 51.6),
-            ...     output_path="london_full_128band.tif"
+            >>> # Using Shapely geometry with clipping
+            >>> from shapely.geometry import box
+            >>> region = box(-0.2, 51.4, 0.1, 51.6)
+            >>> gt.mosaic_embeddings_for_region(
+            ...     output_path="london_clipped.tif",
+            ...     geometry=region,
+            ...     clip_to_geometry=True
             ... )
 
-            >>> # Create selected band subset
-            >>> gt.merge_embeddings_for_region(
-            ...     bounds=(-122.6, 37.2, -121.7, 38.0),
-            ...     output_path="sf_bay_subset.tif",
-            ...     bands=[30, 60, 90]  # Selected bands
+            >>> # Using GeoJSON string
+            >>> geojson = '{"type": "Polygon", "coordinates": [[[-0.2, 51.4], [0.1, 51.4], [0.1, 51.6], [-0.2, 51.6], [-0.2, 51.4]]]}'
+            >>> gt.mosaic_embeddings_for_region(
+            ...     output_path="london.tif",
+            ...     geometry=geojson,
+            ...     bands=[30, 60, 90]
             ... )
 
         Note:
@@ -1531,19 +1546,26 @@ class GeoTessera:
             of the dequantized embeddings. The output file includes full
             georeferencing metadata and can be used in any GIS software.
         """
-        try:
-            import rasterio
-            from rasterio.warp import calculate_default_transform, reproject
-            from rasterio.enums import Resampling
-            from rasterio.merge import merge
-            import tempfile
-            import shutil
-        except ImportError:
-            raise ImportError(
-                "Please install rasterio for embedding merging: pip install rasterio"
-            )
 
-        min_lon, min_lat, max_lon, max_lat = bounds
+
+        # Handle different geometry input types
+        if isinstance(geometry, str):
+            # GeoJSON string
+            geojson = json.loads(geometry)
+            roi_geometry = shape(geojson)
+        elif hasattr(geometry, 'unary_union'):
+            # GeoDataFrame
+            if geometry.crs != "EPSG:4326":
+                geometry = geometry.to_crs("EPSG:4326")
+            roi_geometry = geometry.unary_union
+        elif hasattr(geometry, 'bounds'):
+            # Shapely geometry
+            roi_geometry = geometry
+        else:
+            raise TypeError("geometry must be a GeoDataFrame, Shapely geometry, or GeoJSON string")
+        
+        # Get bounds from geometry
+        min_lon, min_lat, max_lon, max_lat = roi_geometry.bounds
 
         # Determine output configuration based on bands parameter
         if bands is None:
@@ -1561,32 +1583,8 @@ class GeoTessera:
             if any(b < 0 or b > 127 for b in bands):
                 raise ValueError("All band indices must be in range 0-127")
 
-        # Load only the registry blocks needed for this region (much more efficient)
-        self._load_blocks_for_region(bounds, year)
-
-        # Find all embedding tiles that intersect with the bounds
-        tiles_to_merge = []
-        for emb_year, lat, lon in self._available_embeddings:
-            if emb_year != year:
-                continue
-
-            # Check if tile intersects with bounds (tiles are centered on 0.05 grid)
-            tile_min_lon, tile_min_lat = lon - 0.05, lat - 0.05
-            tile_max_lon, tile_max_lat = lon + 0.05, lat + 0.05
-
-            if (
-                tile_min_lon < max_lon
-                and tile_max_lon > min_lon
-                and tile_min_lat < max_lat
-                and tile_max_lat > min_lat
-            ):
-                tiles_to_merge.append((lat, lon))
-
-        if not tiles_to_merge:
-            raise ValueError(
-                f"No embedding tiles found for the specified region in year {year}"
-            )
-
+        # Find all embedding tiles that intersect with the region
+        tiles_to_merge = self._find_intersecting_tiles_for_geometry(roi_geometry, year)
         print(f"Found {len(tiles_to_merge)} embedding tiles to merge for year {year}")
 
         # Create temporary directory for georeferenced TIFF files
@@ -1716,7 +1714,48 @@ class GeoTessera:
                 # Ensure the merged array is float32
                 final_array = merged_array.astype(np.float32)
 
-                # Write the merged result
+                # Clip to ROI geometry if requested
+                if clip_to_geometry:
+                    print("Clipping merged result to ROI geometry...")
+                    
+                    # Reproject ROI geometry to target CRS if needed
+                    if target_crs != "EPSG:4326":
+                        transformer = pyproj.Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
+                        roi_geometry_reprojected = transform(transformer.transform, roi_geometry)
+                    else:
+                        roi_geometry_reprojected = roi_geometry
+                    
+                    # Use rasterio.mask.mask with a memory file for direct clipping
+                    
+                    with MemoryFile() as memfile:
+                        # Write the array to memory
+                        with memfile.open(
+                            driver="GTiff",
+                            height=final_array.shape[1],
+                            width=final_array.shape[2],
+                            count=final_array.shape[0],
+                            dtype="float32",
+                            crs=target_crs,
+                            transform=merged_transform,
+                        ) as temp_dst:
+                            temp_dst.write(final_array)
+                        
+                        # Read and clip in one operation
+                        with memfile.open() as src:
+                            clipped_array, clipped_transform = mask(
+                                src, 
+                                [roi_geometry_reprojected], 
+                                crop=True, 
+                                all_touched=True
+                            )
+                            
+                            # Update final array and transform
+                            final_array = clipped_array.astype(np.float32)
+                            merged_transform = clipped_transform
+                            
+                            print(f"Clipped dimensions: {final_array.shape[2]}x{final_array.shape[1]} pixels")
+
+                # Write the merged (and optionally clipped) result
                 with rasterio.open(
                     output_path,
                     "w",
@@ -1747,6 +1786,8 @@ class GeoTessera:
         finally:
             # Clean up temporary files
             shutil.rmtree(temp_dir)
+
+
 
     def find_tiles_for_geometry(
         self,
@@ -1786,7 +1827,7 @@ class GeoTessera:
 
         required_blocks = get_all_blocks_in_range(min_lon, max_lon, min_lat, max_lat)
 
-        # Load required blocks (same approach as merge_embeddings_for_region)
+        # Load required blocks (same approach as mosaic_embeddings_for_region)
         for block_lon, block_lat in required_blocks:
             block_key = (year, block_lon, block_lat)
             if block_key not in self._loaded_blocks:
@@ -1815,13 +1856,14 @@ class GeoTessera:
 
         return tiles
 
-    def merge_embeddings_for_region_file(
+    def mosaic_embeddings_for_region_file(
         self,
         region_path: Union[str, Path],
         output_path: str,
         target_crs: str = "EPSG:4326",
         bands: Optional[List[int]] = None,
         year: int = 2024,
+        clip_to_geometry: bool = True,
     ) -> Optional[str]:
         """Create a seamless mosaic of Tessera embeddings for a region file.
 
@@ -1835,23 +1877,28 @@ class GeoTessera:
             target_crs: Target coordinate system (default: "EPSG:4326")
             bands: Band indices to include, or None for all bands
             year: Year of embeddings to use
+            clip_to_geometry: Whether to clip output to exact region geometry.
+                            Default True.
 
         Returns:
             Path to created TIFF file, or None on error
 
         Example:
             >>> tessera = GeoTessera()
-            >>> result = tessera.merge_embeddings_for_region_file(
+            >>> result = tessera.mosaic_embeddings_for_region_file(
             ...     region_path="study_area.geojson",
             ...     output_path="embeddings.tiff",
             ...     bands=[0, 1, 2]
             ... )
         """
         try:
-            from .io import load_roi
-
-            # Load region using the robust load_roi function
-            gdf = load_roi(region_path)
+            import geopandas as gpd
+            
+            # Load region from file
+            gdf = gpd.read_file(region_path)
+            if gdf.crs != "EPSG:4326":
+                gdf = gdf.to_crs("EPSG:4326")
+            
             bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
             min_lon, min_lat, max_lon, max_lat = bounds
 
@@ -1860,13 +1907,14 @@ class GeoTessera:
             )
             print(f"Region contains {len(gdf)} feature(s)")
 
-            # Use the existing merge method with bounds
-            output = self.merge_embeddings_for_region(
-                bounds=(min_lon, min_lat, max_lon, max_lat),
+            # Use the main mosaic function with the loaded geometry
+            output = self.mosaic_embeddings_for_region(
                 output_path=output_path,
+                geometry=gdf,
                 target_crs=target_crs,
                 bands=bands,
                 year=year,
+                clip_to_geometry=clip_to_geometry
             )
 
             return output
@@ -1877,6 +1925,88 @@ class GeoTessera:
 
             traceback.print_exc()
             return None
+
+    def mosaic_embeddings_for_region_bounds(
+        self,
+        output_path: str,
+        bounds: Tuple[float, float, float, float],
+        target_crs: str = "EPSG:4326",
+        bands: Optional[List[int]] = None,
+        year: int = 2024,
+        clip_to_geometry: bool = False,
+    ) -> str:
+        """Create a seamless mosaic of Tessera embeddings for a geographic region defined by bounds.
+
+        Merges multiple embedding tiles into a single georeferenced GeoTIFF,
+        handling coordinate system differences and ensuring perfect alignment.
+        This method uses land mask files to obtain optimal projection metadata
+        for each tile, preventing coordinate skew when tiles span different
+        UTM zones.
+
+        The process:
+        1. Identifies all tiles intersecting the bounding box
+        2. Downloads embeddings and corresponding land masks
+        3. Creates georeferenced temporary files using land mask CRS metadata
+        4. Reprojects tiles to common coordinate system if needed
+        5. Merges all tiles into seamless mosaic
+
+        Args:
+            output_path: Filename for the output GeoTIFF mosaic.
+            bounds: Region bounds as (min_lon, min_lat, max_lon, max_lat) in
+                    decimal degrees. Example: (-0.2, 51.4, 0.1, 51.6) for London.
+            target_crs: Coordinate system for output. Default "EPSG:4326" (WGS84).
+                       Use local projections (e.g., UTM) for accurate area measurements.
+            bands: List of channel indices to include in output. If None (default),
+                   exports all 128 channels. If specified, exports only the selected
+                   channels (e.g., [0,1,2] for specific band selection).
+                   All indices must be in range 0-127.
+            year: Year of embeddings to merge (2017-2024).
+            clip_to_geometry: Whether to clip output to exact region geometry.
+                            Default False for bounds-based input (legacy behavior).
+
+        Returns:
+            Path to the created mosaic GeoTIFF file.
+
+        Raises:
+            ImportError: If rasterio is not installed.
+            ValueError: If no tiles found for region or invalid parameters.
+            RuntimeError: If land masks are not available for alignment.
+
+        Examples:
+            >>> gt = GeoTessera()
+            >>> # Create full 128-band mosaic (no clipping)
+            >>> gt.mosaic_embeddings_for_region_bounds(
+            ...     output_path="london_full_128band.tif",
+            ...     bounds=(-0.2, 51.4, 0.1, 51.6)
+            ... )
+
+            >>> # Create selected band subset with clipping
+            >>> gt.mosaic_embeddings_for_region_bounds(
+            ...     output_path="sf_bay_clipped.tif",
+            ...     bounds=(-122.6, 37.2, -121.7, 38.0),
+            ...     bands=[30, 60, 90],  # Selected bands
+            ...     clip_to_geometry=True
+            ... )
+
+        Note:
+            Large regions require significant memory and processing time.
+            Full 128-band outputs can be very large (>1GB for large regions).
+            All outputs are stored as float32 to preserve the full precision
+            of the dequantized embeddings. The output file includes full
+            georeferencing metadata and can be used in any GIS software.
+        """
+        # Create a box geometry from bounds
+        geometry = box(bounds[0], bounds[1], bounds[2], bounds[3])
+        
+        # Use the main mosaic function with user-specified clipping
+        return self.mosaic_embeddings_for_region(
+            output_path=output_path,
+            geometry=geometry,
+            target_crs=target_crs,
+            bands=bands,
+            year=year,
+            clip_to_geometry=clip_to_geometry
+        )
 
     def extract_points(
         self,
@@ -2095,3 +2225,319 @@ class GeoTessera:
         landmask_path = self._fetch_landmask(lat, lon, progressbar=False)
         with rasterio.open(landmask_path) as src:
             return src.transform
+
+    def _find_intersecting_tiles_for_geometry(
+        self,
+        geometry: "shapely.geometry.BaseGeometry",
+        year: int = 2024,
+    ) -> List[Tuple[float, float]]:
+        """Find all available tiles intersecting with a given Shapely geometry.
+
+        This is a reusable internal function that extracts the intersection logic
+        used by both mosaic_embeddings_for_region and export_embedding_tiles_for_region.
+
+        Args:
+            geometry: A Shapely geometry (must be in EPSG:4326)
+            year: Year of embeddings to search
+
+        Returns:
+            List of (lat, lon) tuples for tiles that intersect the geometry
+        """
+        # Get bounds of the geometry for efficient registry loading
+        min_lon, min_lat, max_lon, max_lat = geometry.bounds
+
+        # Load only the registry blocks needed for this region (much more efficient)
+        self._load_blocks_for_region((min_lon, min_lat, max_lon, max_lat), year)
+
+        # Find all embedding tiles that intersect with the region
+        tiles_to_export = []
+        for emb_year, lat, lon in self._available_embeddings:
+            if emb_year != year:
+                continue
+
+            # Create tile bounding box using the same method as find_tiles_for_geometry
+            tile_box = self.get_tile_box(lat, lon)
+            
+            # Check intersection using Shapely geometry intersection
+            if geometry.intersects(tile_box):
+                tiles_to_export.append((lat, lon))
+
+        if not tiles_to_export:
+            raise ValueError(
+                f"No embedding tiles found for the specified region in year {year}"
+            )
+
+        return tiles_to_export
+
+    def export_embedding_tiles_for_region(
+        self,
+        geometry: "shapely.geometry.BaseGeometry",
+        output_dir: Union[str, Path],
+        year: int = 2024,
+        bands: Optional[List[int]] = None,
+    ) -> List[str]:
+        """Export all embedding tiles that intersect with a region as individual GeoTIFFs.
+
+        Given a Shapely geometry defining a region of interest, this function:
+        1. Finds all embedding tiles that intersect with the region
+        2. Exports each tile as an individual GeoTIFF file
+        3. Saves all files to the specified output directory
+
+        Args:
+            geometry: A Shapely geometry defining the region of interest (must be in EPSG:4326)
+            output_dir: Directory where individual GeoTIFF files will be saved
+            year: Year of embeddings to export (2017-2024)
+            bands: Channel indices to include in output. If None (default), exports all 128 channels.
+                   If specified, exports only the selected channels (e.g., [0,1,2] for RGB visualization).
+                   All indices must be in range 0-127.
+
+        Returns:
+            List of paths to the created GeoTIFF files
+
+        Raises:
+            ImportError: If rasterio is not installed
+            ValueError: If no tiles found for region or invalid parameters
+            RuntimeError: If output directory cannot be created
+
+        Example:
+            >>> from shapely.geometry import box
+            >>> gt = GeoTessera()
+            >>> 
+            >>> # Define a region around Paris
+            >>> paris_region = box(2.3, 48.8, 2.4, 48.9)
+            >>> 
+            >>> # Export all intersecting tiles as individual GeoTIFFs
+            >>> tiff_paths = gt.export_embedding_tiles_for_region(
+            ...     geometry=paris_region,
+            ...     output_dir="paris_tiles",
+            ...     bands=[0, 1, 2]  # RGB visualization
+            ... )
+            >>> print(f"Exported {len(tiff_paths)} tiles")
+
+        Note:
+            Each tile is exported as a separate GeoTIFF file with proper georeferencing.
+            File names follow the pattern: tile_{lat:.2f}_{lon:.2f}.tiff
+            Large regions may result in many files and require significant disk space.
+            All outputs are stored as float32 to preserve the full precision of embeddings.
+        """
+        try:
+            import rasterio
+            from rasterio.transform import from_bounds
+        except ImportError:
+            raise ImportError(
+                "Please install rasterio for TIFF export: pip install rasterio"
+            )
+
+        # Ensure output directory exists
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine output configuration based on bands parameter
+        if bands is None:
+            # All 128 bands
+            output_bands = None
+            num_bands = 128
+            print("Exporting all 128 bands")
+        else:
+            # Selected bands mode
+            output_bands = bands
+            num_bands = len(bands)
+            print(f"Exporting {num_bands} selected bands")
+
+            # Validate band indices
+            if any(b < 0 or b > 127 for b in bands):
+                raise ValueError("All band indices must be in range 0-127")
+
+        # Find all intersecting tiles
+        tiles_to_export = self._find_intersecting_tiles_for_geometry(geometry, year)
+        print(f"Found {len(tiles_to_export)} embedding tiles to export for year {year}")
+
+        exported_paths = []
+
+        # Export each tile as an individual GeoTIFF
+        for lat, lon in tiles_to_export:
+            try:
+                # Fetch and dequantize the embedding
+                data = self.fetch_embedding(lat=lat, lon=lon, year=year, progressbar=False)
+
+                # Extract bands for output
+                if output_bands is None:
+                    # Use all 128 bands
+                    vis_data = data.copy()
+                else:
+                    # Use selected bands
+                    vis_data = data[:, :, output_bands].copy()
+
+                # Keep as float32 for full precision
+                vis_data_uint8 = vis_data.astype(np.float32)
+                output_dtype = "float32"
+
+                # Get dimensions from data
+                height, width = vis_data_uint8.shape[:2]
+
+                # Read geospatial metadata from the landmask GeoTIFF
+                landmask_path = self._fetch_landmask(lat, lon, progressbar=False)
+                with rasterio.open(landmask_path) as landmask_src:
+                    src_transform = landmask_src.transform
+                    src_crs = landmask_src.crs
+
+                # Create output filename
+                output_filename = f"tile_{lat:.2f}_{lon:.2f}.tiff"
+                output_path = output_dir / output_filename
+
+                # Write the GeoTIFF
+                with rasterio.open(
+                    output_path,
+                    "w",
+                    driver="GTiff",
+                    height=height,
+                    width=width,
+                    count=num_bands,
+                    dtype=output_dtype,
+                    crs=src_crs,
+                    transform=src_transform,
+                    compress="lzw",
+                ) as dst:
+                    # Write each band
+                    for i in range(num_bands):
+                        dst.write(vis_data_uint8[:, :, i], i + 1)
+
+                exported_paths.append(str(output_path))
+                print(f"Exported tile at ({lat:.2f}, {lon:.2f}) to {output_path}")
+
+            except Exception as e:
+                print(f"Warning: Failed to export tile ({lat:.2f}, {lon:.2f}): {e}")
+                continue
+
+        if not exported_paths:
+            raise RuntimeError("No tiles were successfully exported")
+
+        print(f"Successfully exported {len(exported_paths)} tiles to {output_dir}")
+        return exported_paths
+
+    def export_embedding_tiles_for_region_bounds(
+        self,
+        bounds: Tuple[float, float, float, float],
+        output_dir: Union[str, Path],
+        year: int = 2024,
+        bands: Optional[List[int]] = None,
+    ) -> List[str]:
+        """Export all embedding tiles that intersect with a region defined by bounds.
+
+        Convenience method that creates a box geometry from bounds and exports
+        all intersecting tiles as individual GeoTIFFs.
+
+        Args:
+            bounds: Tuple of (min_lon, min_lat, max_lon, max_lat) defining the region
+            output_dir: Directory where individual GeoTIFF files will be saved
+            year: Year of embeddings to export (2017-2024)
+            bands: Channel indices to include in output. If None (default), exports all 128 channels.
+                   If specified, exports only the selected channels (e.g., [0,1,2] for RGB visualization).
+                   All indices must be in range 0-127.
+
+        Returns:
+            List of paths to the created GeoTIFF files
+
+        Raises:
+            ImportError: If rasterio is not installed
+            ValueError: If no tiles found for region or invalid parameters
+            RuntimeError: If output directory cannot be created
+
+        Example:
+            >>> gt = GeoTessera()
+            >>> 
+            >>> # Define bounds for a region around Paris
+            >>> paris_bounds = (2.3, 48.8, 2.4, 48.9)
+            >>> 
+            >>> # Export all intersecting tiles as individual GeoTIFFs
+            >>> tiff_paths = gt.export_embedding_tiles_for_region_bounds(
+            ...     bounds=paris_bounds,
+            ...     output_dir="paris_tiles",
+            ...     bands=[0, 1, 2]  # RGB visualization
+            ... )
+            >>> print(f"Exported {len(tiff_paths)} tiles")
+
+        Note:
+            This is a convenience wrapper around export_embedding_tiles_for_region()
+            that creates a box geometry from the provided bounds.
+        """
+        from shapely.geometry import box
+        
+        # Create a box geometry from the bounds
+        geometry = box(bounds[0], bounds[1], bounds[2], bounds[3])
+        
+        # Call the main export function
+        return self.export_embedding_tiles_for_region(
+            geometry=geometry,
+            output_dir=output_dir,
+            year=year,
+            bands=bands
+        )
+
+    def export_embedding_tiles_for_region_file(
+        self,
+        region_path: Union[str, Path],
+        output_dir: Union[str, Path],
+        year: int = 2024,
+        bands: Optional[List[int]] = None,
+    ) -> Optional[List[str]]:
+        """Export all embedding tiles that intersect with a region defined by a file.
+
+        Convenience method that loads a region from a file and exports all intersecting
+        tiles as individual GeoTIFFs. Supports all formats that GeoPandas can read
+        including GeoJSON, Shapefile, GeoPackage, etc.
+
+        Args:
+            region_path: Path to region file (GeoJSON, Shapefile, etc.)
+            output_dir: Directory where individual GeoTIFF files will be saved
+            year: Year of embeddings to export (2017-2024)
+            bands: Channel indices to include in output. If None (default), exports all 128 channels.
+                   If specified, exports only the selected channels (e.g., [0,1,2] for RGB visualization).
+                   All indices must be in range 0-127.
+
+        Returns:
+            List of paths to the created GeoTIFF files, or None on error
+
+        Raises:
+            ImportError: If rasterio is not installed
+            ValueError: If no tiles found for region or invalid parameters
+            RuntimeError: If output directory cannot be created or region file cannot be read
+
+        Example:
+            >>> gt = GeoTessera()
+            >>> 
+            >>> # Export tiles for a region defined by a GeoJSON file
+            >>> tiff_paths = gt.export_embedding_tiles_for_region_file(
+            ...     region_path="study_area.geojson",
+            ...     output_dir="study_tiles",
+            ...     bands=[0, 1, 2]  # RGB visualization
+            ... )
+            >>> print(f"Exported {len(tiff_paths)} tiles")
+
+        Note:
+            This is a convenience wrapper around export_embedding_tiles_for_region()
+            that loads a geometry from a file. The file must contain geometries in
+            EPSG:4326 or be convertible to it.
+        """
+        try:
+            # Load region using GeoPandas
+            gdf = gpd.read_file(region_path)
+            
+            # Ensure it's in the correct CRS
+            if gdf.crs != "EPSG:4326":
+                gdf = gdf.to_crs("EPSG:4326")
+            
+            # Create a unified geometry (union of all features)
+            geometry = gdf.unary_union
+            
+            # Call the main export function
+            return self.export_embedding_tiles_for_region(
+                geometry=geometry,
+                output_dir=output_dir,
+                year=year,
+                bands=bands
+            )
+            
+        except Exception as e:
+            print(f"Error reading region file {region_path}: {e}")
+            return None

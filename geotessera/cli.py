@@ -325,12 +325,13 @@ def visualize_command(args):
     print(f"Analyzing region file: {args.region}")
 
     # Use core library method to create merged TIFF
-    output_path = tessera.merge_embeddings_for_region_file(
+    output_path = tessera.mosaic_embeddings_for_region_file(
         region_path=args.region,
         output_path=args.output,
         bands=args.bands,
         year=args.year,
         target_crs=args.target_crs,
+        clip_to_geometry=args.clip_to_geometry,
     )
 
     if output_path:
@@ -788,12 +789,13 @@ def generate_static_tessera_tiles(
     print("Merging tessera embeddings for region...")
     temp_tiff = os.path.join(output_dir, "tessera_viz.tiff")
 
-    output_path = tessera.merge_embeddings_for_region_file(
+    output_path = tessera.mosaic_embeddings_for_region_file(
         region_path=region_path,
         output_path=temp_tiff,
         bands=bands,
         year=year,
         target_crs="EPSG:4326",
+        clip_to_geometry=True,  # Default to clipping for tile generation
     )
 
     if not output_path:
@@ -1129,6 +1131,11 @@ Note: The 'visualize' command creates GeoTIFFs from embeddings. Default behavior
         type=int,
         default=2024,
         help="Year of embeddings to visualize (default: 2024)",
+    )
+    viz_parser.add_argument(
+        "--clip-to-geometry",
+        action="store_true",
+        help="Clip output to exact region geometry (default: False)",
     )
     viz_parser.set_defaults(func=visualize_command)
 
