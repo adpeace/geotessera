@@ -1551,9 +1551,9 @@ def sync_remote_command(args):
             continue
 
         # Parse rsync itemize-changes format
-        # Format: >f+++++++++ path/to/file
-        # >f = file transfer, + = new, . = unchanged, etc.
-        if line.startswith('>f'):
+        # Format: >f+++++++++ path/to/file or .f...pog... path/to/file
+        # >f = file transfer, .f = file with attribute changes (permissions/ownership/timestamps)
+        if line.startswith('>f') or line.startswith('.f'):
             parts = line.split()
             if len(parts) >= 2:
                 file_path = parts[-1]
