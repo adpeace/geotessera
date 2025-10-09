@@ -1521,11 +1521,17 @@ def sync_remote_command(args):
     rsync_cmd = [
         'rsync',
         '-avz',
+        '--no-perms',
+        '--no-owner',
+        '--no-group',
         '--itemize-changes',
         '--dry-run',
         f'{remote_endpoint}/global_0.1_degree_representation/',
         f'{repr_dir}/'
     ]
+
+    # Show the rsync command being run
+    console.print(f"[dim]Running: {' '.join(rsync_cmd)}[/dim]")
 
     try:
         result = subprocess.run(
@@ -1551,9 +1557,9 @@ def sync_remote_command(args):
             continue
 
         # Parse rsync itemize-changes format
-        # Format: >f+++++++++ path/to/file or .f...pog... path/to/file
-        # >f = file transfer, .f = file with attribute changes (permissions/ownership/timestamps)
-        if line.startswith('>f') or line.startswith('.f'):
+        # Format: >f+++++++++ path/to/file (file being transferred)
+        # Only detect new files, ignore permission/ownership changes
+        if line.startswith('>f'):
             parts = line.split()
             if len(parts) >= 2:
                 file_path = parts[-1]
@@ -1655,10 +1661,16 @@ def sync_remote_command(args):
     rsync_sync_cmd = [
         'rsync',
         '-avz',
+        '--no-perms',
+        '--no-owner',
+        '--no-group',
         '--progress',
         f'{remote_endpoint}/global_0.1_degree_representation/',
         f'{repr_dir}/'
     ]
+
+    # Show the rsync command being run
+    console.print(f"[dim]Running: {' '.join(rsync_sync_cmd)}[/dim]")
 
     try:
         # Run rsync with real-time output
