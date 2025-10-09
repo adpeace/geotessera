@@ -598,9 +598,28 @@ def list_command(args):
 
 def process_grid_checksum(args):
     """Process a single grid directory to generate SHA256 checksums."""
-    year_dir, grid_name, force = args
+    year_dir, grid_name, force, modified_days = args
     grid_dir = os.path.join(year_dir, grid_name)
     sha256_file = os.path.join(grid_dir, "SHA256")
+
+    # Check if any .npy files were modified recently (if modified_days is set)
+    if modified_days is not None and modified_days > 0:
+        import time
+        cutoff_time = time.time() - (modified_days * 86400)  # Convert days to seconds
+
+        # Check if any .npy files in this directory were modified after cutoff
+        npy_files = [f for f in os.listdir(grid_dir) if f.endswith(".npy")]
+        has_recent_changes = False
+
+        for npy_file in npy_files:
+            npy_path = os.path.join(grid_dir, npy_file)
+            if os.path.getmtime(npy_path) > cutoff_time:
+                has_recent_changes = True
+                break
+
+        if not has_recent_changes:
+            # No files modified recently, skip this directory
+            return (grid_name, len(npy_files), True, "skipped (no recent changes)")
 
     # Skip if SHA256 file already exists and force is not enabled
     if not force and os.path.exists(sha256_file):
@@ -635,13 +654,15 @@ def process_grid_checksum(args):
     return (grid_name, 0, True, None)
 
 
-def generate_embeddings_checksums(base_dir, force=False):
+def generate_embeddings_checksums(base_dir, force=False, modified_days=None):
     """Generate SHA256 checksums for .npy files in each embeddings subdirectory."""
     from tqdm import tqdm
 
     print("Generating SHA256 checksums for embeddings...")
     if force:
         print("Force mode enabled - regenerating all checksums")
+    if modified_days is not None and modified_days > 0:
+        print(f"Only processing files modified in the last {modified_days} days")
 
     # Get number of CPU cores
     num_cores = multiprocessing.cpu_count()
@@ -678,7 +699,7 @@ def generate_embeddings_checksums(base_dir, force=False):
         total_grids += len(grid_dirs)
 
         # Prepare arguments for parallel processing
-        grid_args = [(year_dir, grid_name, force) for grid_name in sorted(grid_dirs)]
+        grid_args = [(year_dir, grid_name, force, modified_days) for grid_name in sorted(grid_dirs)]
 
         # Process grid directories in parallel
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
@@ -746,13 +767,15 @@ def process_tiff_chunk(args):
         return (chunk_num, len(chunk), False, f"Exception: {e}", temp_file)
 
 
-def generate_tiff_checksums(base_dir, force=False):
+def generate_tiff_checksums(base_dir, force=False, modified_days=None):
     """Generate SHA256 checksums for TIFF files using chunked parallel processing."""
     from tqdm import tqdm
 
     print("Generating SHA256 checksums for TIFF files...")
     if force:
         print("Force mode enabled - regenerating all checksums")
+    if modified_days is not None and modified_days > 0:
+        print(f"Only processing files modified in the last {modified_days} days")
 
     # Get number of CPU cores
     num_cores = multiprocessing.cpu_count()
@@ -760,15 +783,31 @@ def generate_tiff_checksums(base_dir, force=False):
 
     # Check if SHA256SUM already exists and force is not enabled
     sha256sum_file = os.path.join(base_dir, "SHA256SUM")
-    if not force and os.path.exists(sha256sum_file):
+    if not force and os.path.exists(sha256sum_file) and modified_days is None:
         print("SHA256SUM file already exists. Skipping (use --force to regenerate)")
         return 0
 
     # Find all .tiff files
     tiff_files = []
-    for file in os.listdir(base_dir):
-        if file.endswith(".tiff") or file.endswith(".tif"):
-            tiff_files.append(file)
+
+    if modified_days is not None and modified_days > 0:
+        import time
+        cutoff_time = time.time() - (modified_days * 86400)
+
+        # Only include TIFF files modified after cutoff
+        for file in os.listdir(base_dir):
+            if file.endswith(".tiff") or file.endswith(".tif"):
+                file_path = os.path.join(base_dir, file)
+                if os.path.getmtime(file_path) > cutoff_time:
+                    tiff_files.append(file)
+
+        if not tiff_files:
+            print(f"No TIFF files modified in the last {modified_days} days")
+            return 0
+    else:
+        for file in os.listdir(base_dir):
+            if file.endswith(".tiff") or file.endswith(".tif"):
+                tiff_files.append(file)
 
     if not tiff_files:
         print("No TIFF files found")
@@ -1219,6 +1258,7 @@ def hash_command(args):
         return 1
 
     force = getattr(args, 'force', False)
+    modified_days = getattr(args, 'modified_days', None)
 
     # Check if this is an embeddings directory structure
     repr_dir = os.path.join(base_dir, "global_0.1_degree_representation")
@@ -1229,13 +1269,13 @@ def hash_command(args):
     # Process embeddings if directory exists
     if os.path.exists(repr_dir):
         print(f"Processing embeddings directory: {repr_dir}")
-        if generate_embeddings_checksums(repr_dir, force=force) == 0:
+        if generate_embeddings_checksums(repr_dir, force=force, modified_days=modified_days) == 0:
             processed_any = True
 
     # Process TIFF files if directory exists
     if os.path.exists(tiles_dir):
         print(f"Processing TIFF directory: {tiles_dir}")
-        if generate_tiff_checksums(tiles_dir, force=force) == 0:
+        if generate_tiff_checksums(tiles_dir, force=force, modified_days=modified_days) == 0:
             processed_any = True
 
     if not processed_any:
@@ -1445,13 +1485,239 @@ def create_commit_message(changes_by_year, registry_files_changed):
     return "\n".join(message_parts)
 
 
+def sync_remote_command(args):
+    """Synchronize data from remote SSH endpoint to local filesystem."""
+    console = Console()
+
+    base_dir = os.path.abspath(args.base_dir)
+    remote_endpoint = args.remote_endpoint
+    dry_run = getattr(args, 'dry_run', False)
+
+    # Validate base directory exists
+    if not os.path.exists(base_dir):
+        console.print(f"[red]Error: Local directory {base_dir} does not exist[/red]")
+        return 1
+
+    # Check for embeddings directory
+    repr_dir = os.path.join(base_dir, "global_0.1_degree_representation")
+    if not os.path.exists(repr_dir):
+        console.print(f"[yellow]Warning: Embeddings directory not found: {repr_dir}[/yellow]")
+        console.print("[yellow]Creating directory structure...[/yellow]")
+        os.makedirs(repr_dir, exist_ok=True)
+
+    # Show header
+    mode_str = "[yellow]DRY RUN MODE[/yellow]" if dry_run else "[green]SYNC MODE[/green]"
+    console.print(Panel.fit(
+        f"[bold blue]🔄 Sync Remote to Local[/bold blue]\n"
+        f"Mode: {mode_str}\n"
+        f"Remote: {remote_endpoint}\n"
+        f"Local: {repr_dir}",
+        style="blue"
+    ))
+
+    # Step 1: Run rsync dry-run to identify changes
+    console.print("\n[blue]Step 1: Analyzing remote changes...[/blue]")
+
+    rsync_cmd = [
+        'rsync',
+        '-avz',
+        '--itemize-changes',
+        '--dry-run',
+        f'{remote_endpoint}/global_0.1_degree_representation/',
+        f'{repr_dir}/'
+    ]
+
+    try:
+        result = subprocess.run(
+            rsync_cmd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Error running rsync: {e}[/red]")
+        if e.stderr:
+            console.print(f"[dim]Rsync error: {e.stderr}[/dim]")
+        return 1
+
+    # Step 2: Parse rsync output to find affected grid directories
+    affected_grids = set()
+    total_changes = 0
+    new_files = 0
+    modified_files = 0
+
+    for line in result.stdout.split('\n'):
+        if not line.strip():
+            continue
+
+        # Parse rsync itemize-changes format
+        # Format: >f+++++++++ path/to/file
+        # >f = file transfer, + = new, . = unchanged, etc.
+        if line.startswith('>f'):
+            parts = line.split()
+            if len(parts) >= 2:
+                file_path = parts[-1]
+
+                # Track change type
+                if '+++++++' in line:
+                    new_files += 1
+                else:
+                    modified_files += 1
+
+                total_changes += 1
+
+                # Extract year and grid directory from path
+                # Expected format: YYYY/grid_lon_lat/filename.npy
+                path_parts = file_path.split('/')
+                if len(path_parts) >= 3:
+                    year = path_parts[0]
+                    grid_dir = path_parts[1]
+
+                    # Only track grid directories (not individual files)
+                    if grid_dir.startswith('grid_'):
+                        affected_grids.add((year, grid_dir))
+
+    if total_changes == 0:
+        console.print("[green]✓ No changes detected - remote and local are in sync[/green]")
+        return 0
+
+    # Display summary of changes
+    summary_table = Table(show_header=False, box=None)
+    summary_table.add_row("📊 Total changes:", f"{total_changes:,}")
+    summary_table.add_row("  • New files:", f"{new_files:,}")
+    summary_table.add_row("  • Modified files:", f"{modified_files:,}")
+    summary_table.add_row("📁 Affected grid directories:", f"{len(affected_grids):,}")
+
+    console.print(Panel(
+        summary_table,
+        title="[bold]📋 Change Summary[/bold]",
+        border_style="cyan"
+    ))
+
+    # Step 3: Identify SHA256 files to delete
+    sha256_files_to_delete = []
+
+    for year, grid_dir in sorted(affected_grids):
+        sha256_file = os.path.join(repr_dir, year, grid_dir, "SHA256")
+        if os.path.exists(sha256_file):
+            sha256_files_to_delete.append((year, grid_dir, sha256_file))
+
+    if sha256_files_to_delete:
+        console.print(f"\n[yellow]⚠️  Will delete {len(sha256_files_to_delete)} SHA256 checksum files[/yellow]")
+        console.print("[dim]These will be regenerated when you run 'geotessera-registry hash'[/dim]")
+
+        # Show sample of files to delete
+        if len(sha256_files_to_delete) <= 10:
+            console.print("\n[blue]SHA256 files to delete:[/blue]")
+            for year, grid_dir, sha256_file in sha256_files_to_delete:
+                rel_path = os.path.relpath(sha256_file, base_dir)
+                console.print(f"  • {rel_path}")
+        else:
+            console.print("\n[blue]Sample SHA256 files to delete:[/blue]")
+            for year, grid_dir, sha256_file in sha256_files_to_delete[:5]:
+                rel_path = os.path.relpath(sha256_file, base_dir)
+                console.print(f"  • {rel_path}")
+            console.print(f"  [dim]... and {len(sha256_files_to_delete) - 5} more[/dim]")
+
+    # If dry-run mode, stop here
+    if dry_run:
+        console.print("\n[yellow]DRY RUN MODE - No changes made[/yellow]")
+        console.print("[blue]To execute the sync, run without --dry-run flag[/blue]")
+        return 0
+
+    # Step 4: Delete SHA256 files
+    if sha256_files_to_delete:
+        console.print("\n[blue]Step 2: Deleting SHA256 files...[/blue]")
+        deleted_count = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Deleting SHA256 files...", total=len(sha256_files_to_delete))
+
+            for year, grid_dir, sha256_file in sha256_files_to_delete:
+                try:
+                    os.remove(sha256_file)
+                    deleted_count += 1
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not delete {sha256_file}: {e}[/yellow]")
+                progress.advance(task)
+
+        console.print(f"[green]✓ Deleted {deleted_count} SHA256 files[/green]")
+
+    # Step 5: Run actual rsync
+    console.print("\n[blue]Step 3: Syncing files from remote...[/blue]")
+
+    rsync_sync_cmd = [
+        'rsync',
+        '-avz',
+        '--progress',
+        f'{remote_endpoint}/global_0.1_degree_representation/',
+        f'{repr_dir}/'
+    ]
+
+    try:
+        # Run rsync with real-time output
+        process = subprocess.Popen(
+            rsync_sync_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        # Stream output
+        for line in process.stdout:
+            # Filter out excessive progress lines
+            line = line.strip()
+            if line and not line.endswith('%'):
+                console.print(f"[dim]{line}[/dim]")
+
+        process.wait()
+
+        if process.returncode != 0:
+            console.print(f"[red]Error: rsync failed with exit code {process.returncode}[/red]")
+            return 1
+
+    except Exception as e:
+        console.print(f"[red]Error running rsync: {e}[/red]")
+        return 1
+
+    # Step 6: Show final summary
+    console.print("\n" + "="*60)
+
+    final_summary = Table(show_header=False, box=None)
+    final_summary.add_row("✅ Status:", "[green]Sync completed successfully[/green]")
+    final_summary.add_row("📊 Files synced:", f"{total_changes:,}")
+    final_summary.add_row("🗑️  SHA256 files deleted:", f"{len(sha256_files_to_delete):,}")
+    final_summary.add_row("📁 Affected directories:", f"{len(affected_grids):,}")
+
+    console.print(Panel(
+        final_summary,
+        title="[bold green]🎉 Sync Complete[/bold green]",
+        border_style="green"
+    ))
+
+    # Show next steps
+    if sha256_files_to_delete:
+        console.print("\n[blue]💡 Next steps:[/blue]")
+        console.print(f"[cyan]  1. Regenerate checksums: geotessera-registry hash {base_dir}[/cyan]")
+        console.print(f"[cyan]  2. Update registries: geotessera-registry scan {base_dir}[/cyan]")
+
+    return 0
+
+
 def commit_command(args):
     """Analyze registry changes and create a commit with summary."""
     console = Console()
-    
+
     # Check if we're in a git repository
     try:
-        subprocess.run(['git', 'rev-parse', '--git-dir'], 
+        subprocess.run(['git', 'rev-parse', '--git-dir'],
                       capture_output=True, check=True)
     except subprocess.CalledProcessError:
         console.print("[red]Error: Not in a git repository[/red]")
@@ -1601,14 +1867,20 @@ Examples:
   
   # Generate SHA256 checksums for embeddings and TIFF files
   geotessera-registry hash /path/to/v1
-  
+
   # This will:
   # - Create SHA256 files in each grid subdirectory under global_0.1_degree_representation/YYYY/
   # - Create SHA256SUM file in global_0.1_degree_tiff_all/ using chunked processing
   # - Skip directories that already have SHA256 files (use --force to regenerate)
-  
+
   # Force regeneration of all checksums
   geotessera-registry hash /path/to/v1 --force
+
+  # Only process files modified in the last 7 days (incremental update)
+  geotessera-registry hash /path/to/v1 --modified-days 7
+
+  # Combine with --force to regenerate checksums only for recently modified files
+  geotessera-registry hash /path/to/v1 --force --modified-days 30
   
   # Scan existing SHA256 checksum files and generate both parquet database and registry files
   geotessera-registry scan /path/to/v1
@@ -1630,11 +1902,27 @@ Examples:
   
   # Analyze registry changes and create a git commit with detailed summary
   geotessera-registry commit
-  
+
   # This will:
   # - Analyze git changes in registry files
   # - Summarize changes by year (tiles added/removed/modified)
   # - Stage registry files and create a commit with detailed message
+
+  # Synchronize data from remote SSH endpoint to local filesystem
+  geotessera-registry sync-remote /path/to/v1 root@host.com:/tessera --dry-run
+
+  # This will:
+  # - Run rsync dry-run to identify files that would change
+  # - Identify SHA256 files that need to be deleted (for affected grid directories)
+  # - Show a summary of changes without actually syncing (dry-run mode)
+
+  # Actually perform the sync
+  geotessera-registry sync-remote /path/to/v1 root@host.com:/tessera
+
+  # This will:
+  # - Delete SHA256 files in affected grid directories
+  # - Sync files from remote to local using rsync
+  # - Show summary and suggest running 'hash' and 'scan' commands
 
 This tool is intended for GeoTessera data maintainers to generate the registry
 files that are distributed with the package. End users typically don't need
@@ -1674,6 +1962,13 @@ Directory Structure:
         "--force",
         action="store_true",
         help="Force regeneration of all checksums, even if SHA256 files already exist",
+    )
+    hash_parser.add_argument(
+        "--modified-days",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help="Only process files modified in the last DAYS days (e.g., --modified-days 7 for files changed in the last week)",
     )
     hash_parser.set_defaults(func=hash_command)
 
@@ -1716,6 +2011,26 @@ Directory Structure:
         help="Analyze registry changes and create a git commit with detailed summary",
     )
     commit_parser.set_defaults(func=commit_command)
+
+    # Sync-remote command
+    sync_parser = subparsers.add_parser(
+        "sync-remote",
+        help="Synchronize data from remote SSH endpoint to local filesystem"
+    )
+    sync_parser.add_argument(
+        "base_dir",
+        help="Local base directory (e.g., /data/tessera/v1)"
+    )
+    sync_parser.add_argument(
+        "remote_endpoint",
+        help="Remote SSH endpoint (e.g., root@host.com:/tessera)"
+    )
+    sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without syncing or deleting SHA256 files"
+    )
+    sync_parser.set_defaults(func=sync_remote_command)
 
     args = parser.parse_args()
 
