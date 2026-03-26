@@ -1386,11 +1386,11 @@ def download(
 
                     if not filtered_tiles:
                         rprint(
-                            f"\n[green]{emoji('✅ ')}SUCCESS: All {len(tiles_to_fetch)} GeoTIFF(s) already exist[/green]"
+                            f"\n[green]{emoji('✅ ')}SUCCESS: All {len(tiles_to_fetch)} GeoTIFF files already exist[/green]"
                         )
                     else:
                         rprint(
-                            f"\n[green]{emoji('✅ ')}SUCCESS: Exported {len(files)} GeoTIFF(s)"
+                            f"\n[green]{emoji('✅ ')}SUCCESS: Exported {len(files)} GeoTIFF files"
                             + (f" ({skipped_files} skipped)" if skipped_files > 0 else "")
                             + "[/green]"
                         )
