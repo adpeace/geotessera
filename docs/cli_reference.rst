@@ -73,6 +73,12 @@ Download embeddings for a region in numpy or GeoTIFF format.
 * ``--list-files`` - List all created files with details
 * ``-v, --verbose`` - Verbose output
 
+**Resume Behaviour**:
+
+Both TIFF and NPY downloads automatically skip files that already exist on
+disk, so interrupted downloads can be resumed by re-running the same command.
+The progress bar reflects only remaining work.
+
 **Examples**::
 
     # Download as GeoTIFF (georeferenced, for GIS)
@@ -356,7 +362,8 @@ Display information about GeoTIFF files or the library.
 
 **Options**:
 
-* ``--geotiffs PATH`` - Analyze GeoTIFF files/directory
+* ``--tiles PATH`` - Analyze tile files/directory (GeoTIFF or NPY format)
+* ``--geotiffs PATH`` - Alias for --tiles (deprecated)
 * ``--dataset-version TEXT`` - Tessera dataset version (default: v1)
 * ``-v, --verbose`` - Verbose output
 
@@ -365,11 +372,11 @@ Display information about GeoTIFF files or the library.
     # Show library information
     geotessera info
 
-    # Analyze GeoTIFF files
-    geotessera info --geotiffs ./london_tiffs
+    # Analyze downloaded tiles (GeoTIFF or NPY)
+    geotessera info --tiles ./london_tiffs
 
     # Analyze single GeoTIFF file
-    geotessera info --geotiffs ./london_tiffs/grid_51.45_-0.05.tif
+    geotessera info --tiles ./london_tiffs/grid_51.45_-0.05.tif
 
     # Verbose library info
     geotessera info --verbose

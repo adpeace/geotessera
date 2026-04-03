@@ -1,3 +1,45 @@
+## v0.8.0 (2026-04-03)
+
+This release adds cloud-native Zarr access, GeoTIFF download improvements,
+and several registry and CLI fixes.
+
+### New Features
+
+- **Zarr v3 store** (`geotessera.store.GeoTesseraZarr`): Cloud-native access
+  to Tessera embeddings via Zarr, with automatic UTM zone routing, point
+  sampling, and region reading. Implements the `geoemb:` convention for
+  geospatial embedding stores (@avsm)
+- **GeoTIFF resume capability**: GeoTIFF downloads now skip existing files
+  and resume interrupted downloads, matching the existing NPY resume behaviour
+  (#222 @maawoo)
+- **`scan --only` flag**: Selectively generate only the embeddings or landmasks
+  parquet database during registry scans (@avsm)
+- **Truncated NPY detection**: `geotessera-registry check` now detects
+  truncated `.npy` files and reports them (@avsm)
+
+### Bug Fixes
+
+- **Fixed memory leak in GeoTIFF export**: `export_embedding_geotiffs` now
+  uses a lazy generator instead of materialising all tile data into memory,
+  fixing out-of-memory errors for large regions (#137 #222 @maawoo)
+- **Fixed bbox calculation for projected geometry files**: `--region-file`
+  now reprojects to WGS84 before computing the bounding box, so files in
+  UTM or other projected CRS produce correct results (#226 @maawoo)
+- **Handle CRS-less geometry files**: Geometry files without CRS metadata
+  (common with GeoJSON) now assume WGS84 instead of crashing (@avsm)
+- **Fixed GeoTIFF export progress callback**: Resolved conflicting progress
+  values between fetch and export phases that caused erratic progress bar
+  behaviour (@avsm)
+- **Atomic parquet writes with correct permissions**: Registry parquet files
+  are now written atomically with 644 permissions (@avsm)
+- **Skip ocean-only TIFFs**: Landmask parquet generation now skips
+  ocean-only TIFFs that contain no land pixels (@avsm)
+
+### Other
+
+- Requires Python >= 3.12 (previously >= 3.11)
+- New dependencies: `fsspec`, `aiohttp`, `geozarr-toolkit`, `contextily`
+
 ## v0.7.5 (2026-02-15)
 
 This release reduces startup time for the library, improved coordinate clamping

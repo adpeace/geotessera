@@ -69,7 +69,7 @@ GeoTessera supports two output formats:
 - **tiff**: Georeferenced GeoTIFF files (default, best for GIS) - fully dequantized and ready to use
 - **npy**: Quantized numpy arrays with scales and landmask TIFFs (for advanced analysis and storage efficiency)
 
-For cloud-native zarr access, see :class:`~geotessera.store.GeoTesseraZarr`.
+For cloud-native zarr access without downloading files, see :ref:`zarr-access` below.
 
 Download as GeoTIFF (Recommended for GIS)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -424,6 +424,36 @@ Use both numpy and GeoTIFF formats in the same workflow::
     
     print("Use CLI commands to create PCA visualization and web viewer")
 
+.. _zarr-access:
+
+Cloud-Native Zarr Access
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For interactive or large-scale analysis without downloading files, use the Zarr
+store. This streams data directly from the cloud::
+
+    from geotessera.store import GeoTesseraZarr
+
+    gt = GeoTesseraZarr()
+    print(gt.years)  # [2017, 2018, ..., 2025]
+
+    # Sample embeddings at specific points (no download needed)
+    X = gt.sample_points([(-2.97, 53.44), (0.15, 52.05)], year=2025)
+    print(f"Shape: {X.shape}")  # (2, 128)
+
+    # Read a full region as a mosaic
+    mosaic, transform, crs = gt.read_region(
+        (-3.0, 53.4, -2.9, 53.5), year=2025,
+    )
+    print(f"Mosaic shape: {mosaic.shape}")
+
+    # Work with individual UTM zones via xarray
+    ds = gt.open_zone(lon=0.15)
+    print(ds)
+
+The Zarr store implements the ``geoemb:`` convention for geospatial embedding
+data and automatically routes queries to the correct UTM zone.
+
 Next Steps
 ----------
 
@@ -442,7 +472,9 @@ Common Issues
    Files are cached after first download. Subsequent access will be much faster.
 
 **Memory issues with large regions**:
-   Process tiles individually or use smaller bounding boxes.
+   GeoTIFF export uses lazy streaming (one tile at a time). If you still
+   hit memory limits, download smaller regions or use ``--bands`` to
+   select fewer channels.
 
 **Projection issues in GIS software**:
    GeoTIFF files use UTM projections. Most GIS software will handle this automatically.

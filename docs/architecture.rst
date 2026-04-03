@@ -32,11 +32,13 @@ The library follows a layered architecture:
             ↓
     Data Access Layer
     ├── Direct HTTP downloads (urllib)
+    ├── Zarr v3 store (cloud-native streaming)
     ├── Rasterio (GeoTIFF I/O)
     └── GeoPandas (geospatial operations)
             ↓
     Storage Layer
     ├── Remote servers (https://dl2.geotessera.org)
+    ├── Zarr store (https://dl2.geotessera.org/zarr/)
     └── Local cache (~/.cache/geotessera/registry.parquet)
 
 Coordinate System and Grid
@@ -469,6 +471,40 @@ For sampling at specific locations, use the optimized point sampling method::
 - **Pre-warming**: Download commonly used tiles in advance
 - **Batch processing**: Group requests by geographic region
 - **Size limits**: Respect server rate limits
+
+Zarr Store (Cloud-Native Access)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``GeoTesseraZarr`` class provides cloud-native access to embeddings
+without downloading files. It implements the ``geoemb:`` convention for
+geospatial embedding data stored in Zarr v3 format.
+
+**Architecture**:
+
+Data is organized by UTM zone, with each zone stored as a separate Zarr
+group. The store automatically routes geographic queries to the correct zone::
+
+    zarr store
+    ├── Root attributes (geoemb:model, geoemb:build_version)
+    ├── utm30/           # UTM Zone 30
+    │   ├── time[:]      # Year coordinate array
+    │   ├── embedding    # (time, y, x, band) float32
+    │   └── ...
+    ├── utm31/           # UTM Zone 31
+    │   └── ...
+    └── ...
+
+**Access patterns**:
+
+- **Point sampling**: ``sample_points()`` / ``sample_at()`` for extracting
+  embeddings at specific coordinates across zones
+- **Region reading**: ``read_region()`` for loading rectangular areas as
+  mosaics with CRS and transform metadata
+- **Zone access**: ``open_zone()`` returns an xarray Dataset with a
+  ``.tessera`` accessor for direct manipulation
+
+Datasets are cached per zone for the lifetime of the ``GeoTesseraZarr``
+instance.
 
 Future Extensions
 ~~~~~~~~~~~~~~~~~
