@@ -20,6 +20,38 @@ Override XDG cache directory to use temporary location (for test isolation):
   $ export XDG_CACHE_HOME="$CRAMTMP/cache"
   $ mkdir -p "$XDG_CACHE_HOME"
 
+Test: calculate_bbox_from_file handles CRS correctly
+------------------------------------------------------
+
+Test with a GeoJSON that has no CRS metadata (should assume WGS84):
+
+  $ uv run python -c "
+  > import json, tempfile, os
+  > from geotessera.visualization import calculate_bbox_from_file
+  > geojson = {'type': 'FeatureCollection', 'features': [{'type': 'Feature', 'geometry': {'type': 'Polygon', 'coordinates': [[[0.08, 52.18], [0.15, 52.18], [0.15, 52.21], [0.08, 52.21], [0.08, 52.18]]]}, 'properties': {}}]}
+  > path = os.path.join('$CRAMTMP', 'no_crs.geojson')
+  > with open(path, 'w') as f: json.dump(geojson, f)
+  > bbox = calculate_bbox_from_file(path)
+  > print(f'{bbox[0]:.2f},{bbox[1]:.2f},{bbox[2]:.2f},{bbox[3]:.2f}')
+  > "
+  0.08,52.18,0.15,52.21
+
+Test with a geometry file reprojected to UTM (should reproject back to WGS84):
+
+  $ uv run python -c "
+  > import geopandas as gpd
+  > from shapely.geometry import box
+  > from geotessera.visualization import calculate_bbox_from_file
+  > import os
+  > gdf = gpd.GeoDataFrame(geometry=[box(0.08, 52.18, 0.15, 52.21)], crs='EPSG:4326')
+  > gdf_utm = gdf.to_crs('EPSG:32631')
+  > path = os.path.join('$CRAMTMP', 'utm.geojson')
+  > gdf_utm.to_file(path, driver='GeoJSON')
+  > bbox = calculate_bbox_from_file(path)
+  > print(f'{bbox[0]:.2f},{bbox[1]:.2f},{bbox[2]:.2f},{bbox[3]:.2f}')
+  > "
+  0.08,52.18,0.15,52.21
+
 Test: Download Tiles for Cambridge Region (Bbox)
 -------------------------------------------------
 
@@ -197,7 +229,7 @@ Test that info command works on the created PCA mosaics:
 
   $ geotessera info --tiles "$TESTDIR/cb_tiles_tiff" 2>&1 | grep -E 'Total tiles|Format|Years' | sed 's/ *$//'
    Total tiles: 4
-   Format:      GEOTIFF, NPY, ZARR (USING NPY)
+   Format:      GEOTIFF, NPY (USING NPY)
    Years:       2024
 
 Test: Error Handling - Invalid Input

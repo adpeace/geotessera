@@ -122,25 +122,25 @@ Test: Info Command on Downloaded TIFF Tiles
 Test the info command on the downloaded TIFF tiles.
 Both TIFF and NPY formats should be present (NPY files are retained for efficient reprocessing):
 
-  $ geotessera info --tiles "$TESTDIR/uk_tiles_tiff"
-   Total tiles: 16                             
-   Format:      GEOTIFF, NPY, ZARR (USING NPY) 
-   Years:       2024                           
-   CRS:         EPSG:32630, EPSG:32631         
-   Longitude: -0.200000 to 0.200000  
-   Latitude:  51.200000 to 51.600000 
-   Band Count Files 
-   128 bands     16 
+  $ geotessera info --tiles "$TESTDIR/uk_tiles_tiff" | sed 's/ *$//'
+   Total tiles: 16
+   Format:      GEOTIFF, NPY (USING NPY)
+   Years:       2024
+   CRS:         EPSG:32630, EPSG:32631
+   Longitude: -0.200000 to 0.200000
+   Latitude:  51.200000 to 51.600000
+   Band Count Files
+   128 bands     16
 
-  $ geotessera info --tiles "$TESTDIR/uk_tiles_tiff"
-   Total tiles: 16                             
-   Format:      GEOTIFF, NPY, ZARR (USING NPY) 
-   Years:       2024                           
-   CRS:         EPSG:32630, EPSG:32631         
-   Longitude: -0.200000 to 0.200000  
-   Latitude:  51.200000 to 51.600000 
-   Band Count Files 
-   128 bands     16 
+  $ geotessera info --tiles "$TESTDIR/uk_tiles_tiff" | sed 's/ *$//'
+   Total tiles: 16
+   Format:      GEOTIFF, NPY (USING NPY)
+   Years:       2024
+   CRS:         EPSG:32630, EPSG:32631
+   Longitude: -0.200000 to 0.200000
+   Latitude:  51.200000 to 51.600000
+   Band Count Files
+   128 bands     16
 
 Test: Info Command on Downloaded NPY Tiles
 -------------------------------------------
