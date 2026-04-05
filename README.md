@@ -38,6 +38,7 @@ Please note that if the artifacts you observe are slanted, this is not a bug in 
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
 - [Python API](#python-api)
+- [Cloud-Native Zarr Access](#cloud-native-zarr-access)
 - [CLI Reference](#cli-reference)
 - [Complete Workflows](#complete-workflows)
 - [Registry System](#registry-system)
@@ -45,6 +46,8 @@ Please note that if the artifacts you observe are slanted, this is not a bug in 
 - [Contributing](#contributing)
 
 ## Installation
+
+Requires Python 3.12 or later.
 
 ```bash
 pip install geotessera
@@ -143,7 +146,7 @@ geotessera coverage --country uk
 geotessera coverage --year 2024 --output coverage_2024.png
 
 # Customize the visualization
-geotessera coverage --year 2024 --tile-color blue --tile-alpha 0.3 --dpi 150
+geotessera coverage --year 2024 --tile-color blue --tile-alpha 0.3
 ```
 
 ### Download Embeddings
@@ -181,23 +184,19 @@ geotessera download \
 
 ### Create Visualizations
 
-Generate web maps from downloaded GeoTIFFs:
+Generate PCA visualizations and web maps from downloaded GeoTIFFs:
 
 ```bash
-# Create an interactive web map
-geotessera visualize \
-  ./london_tiffs \
-  --type web \
-  --output ./london_web
+# Create a PCA mosaic from downloaded tiles
+geotessera visualize ./london_tiffs pca_mosaic.tif
 
-# Create an RGB mosaic
-geotessera visualize \
-  ./london_tiffs \
-  --type rgb \
-  --bands "30,60,90" \
-  --output ./london_rgb
+# Use histogram equalization for maximum contrast
+geotessera visualize ./london_tiffs pca_balanced.tif --balance histogram
 
-# Serve the web map locally
+# Create web tiles and serve interactively
+geotessera webmap pca_mosaic.tif --serve
+
+# Serve existing web visualizations locally
 geotessera serve ./london_web --open
 ```
 
@@ -311,6 +310,35 @@ visualize_global_coverage(
 )
 ```
 
+## Cloud-Native Zarr Access
+
+For interactive or large-scale analysis without downloading files, use the Zarr store.
+This streams data directly from the cloud:
+
+```python
+from geotessera.store import GeoTesseraZarr
+
+gt = GeoTesseraZarr()
+print(gt.years)  # [2017, 2018, ..., 2025]
+
+# Sample embeddings at specific points (no download needed)
+X = gt.sample_points([(-2.97, 53.44), (0.15, 52.05)], year=2025)
+print(f"Shape: {X.shape}")  # (2, 128)
+
+# Read a full region as a mosaic
+mosaic, transform, crs = gt.read_region(
+    (-3.0, 53.4, -2.9, 53.5), year=2025,
+)
+print(f"Mosaic shape: {mosaic.shape}")
+
+# Work with individual UTM zones via xarray
+ds = gt.open_zone(lon=0.15)
+print(ds)
+```
+
+The Zarr store implements the `geoemb:` convention for geospatial embedding data
+and automatically routes queries to the correct UTM zone.
+
 ## CLI Reference
 
 ### download
@@ -330,9 +358,13 @@ Options:
   --year INT               Year of embeddings (default: 2024)
   --bands TEXT             Comma-separated band indices (default: all 128)
   --compress TEXT          Compression for TIFF format (default: lzw)
+  --dry-run                Calculate total download size without downloading
+  --skip-hash              Skip SHA256 hash verification of downloaded files
   --list-files             List all created files with details
   -v, --verbose            Verbose output
 ```
+
+**Resume behaviour**: Both TIFF and NPY downloads automatically skip files that already exist on disk, so interrupted downloads can be resumed by re-running the same command.
 
 Single tile examples:
 ```bash
@@ -349,19 +381,34 @@ Output formats:
 
 ### visualize
 
-Create visualizations from GeoTIFF files:
+Create PCA visualization from multiband GeoTIFF or NPY format embeddings:
 
 ```bash
-geotessera visualize INPUT_PATH [OPTIONS]
+geotessera visualize INPUT_PATH OUTPUT_FILE [OPTIONS]
 
 Options:
-  -o, --output PATH        Output directory [required]
-  --type TEXT              Visualization type: rgb, web, coverage
-  --bands TEXT             Comma-separated band indices for RGB
-  --normalize              Normalize bands
+  --n-components INT       Number of PCA components (default: 3)
+  --crs TEXT               Target CRS for reprojection (default: EPSG:3857)
+  --balance TEXT            RGB balance method: histogram, percentile, or adaptive
+  --percentile-low FLOAT   Lower percentile for percentile balance (default: 2.0)
+  --percentile-high FLOAT  Upper percentile for percentile balance (default: 98.0)
+```
+
+### webmap
+
+Create web tiles and interactive viewer from a PCA mosaic:
+
+```bash
+geotessera webmap RGB_MOSAIC [OPTIONS]
+
+Options:
+  -o, --output PATH        Output directory
   --min-zoom INT           Min zoom for web tiles (default: 8)
   --max-zoom INT           Max zoom for web tiles (default: 15)
-  --force                  Force regeneration of tiles
+  --serve/--no-serve       Start web server immediately
+  -p, --port INT           Port for web server (default: 8000)
+  --region-file PATH       GeoJSON/Shapefile boundary to overlay
+  --force/--no-force       Force regeneration of tiles
 ```
 
 ### coverage
@@ -406,7 +453,7 @@ Display information about GeoTIFF files or the library:
 geotessera info [OPTIONS]
 
 Options:
-  --geotiffs PATH          Analyze GeoTIFF files/directory
+  --tiles PATH             Analyze tile files/directory (GeoTIFF or NPY format)
   --dataset-version TEXT   Tessera dataset version
   -v, --verbose            Verbose output
 ```
@@ -455,17 +502,16 @@ gt = GeoTessera()  # Default behavior
 
 The Parquet registry contains columns for:
 - **Coordinates**: `lon`, `lat` (tile center coordinates)
-- **Year**: `year` (data year, 2017-2024)
-- **Hash**: `sha256` (file integrity checksum)
-- **Paths**: File paths for embeddings, scales, and landmasks
-- **Block info**: Internal 5×5 degree block identifiers for efficient queries
+- **Year**: `year` (data year, 2017-2025)
+- **Hash**: `hash` (SHA256 file integrity checksum), `scales_hash` (for scale files)
+- **Size**: `file_size` (file size in bytes for download planning)
 
 ```python
 # Example registry query
 import pandas as pd
 registry = pd.read_parquet("registry.parquet")
 print(registry.head())
-#    lon    lat  year                              sha256  ...
+#    lon    lat  year                                hash  ...
 # 0.15  52.05  2024  abc123...
 ```
 

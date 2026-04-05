@@ -20,18 +20,20 @@ Key Features
 
 * **Global Coverage**: Access embeddings for any terrestrial location worldwide where data exists
 * **Flexible Formats**: Export as numpy arrays for analysis or GeoTIFF for GIS integration
+* **Cloud-Native Zarr Access**: Stream embeddings directly via ``GeoTesseraZarr`` without downloading files
 * **Projection Preservation**: Native UTM projections preserved from landmask tiles
 * **High Resolution**: 10m spatial resolution
 * **Temporal Compression**: Full year of satellite observations in each embedding
 * **Multi-spectral**: Combines Sentinel-1 SAR and Sentinel-2 optical data
 * **Country Support**: Download by country name or custom regions
+* **Resume Capability**: Both TIFF and NPY downloads skip existing files automatically
 * **Efficient Registry**: Block-based lazy loading of only required data
 * **Easy Access**: Python API and CLI with automatic caching
 
 Installation
 ------------
 
-Install GeoTessera using pip::
+Requires Python 3.12 or later. Install GeoTessera using pip::
 
     pip install geotessera
 
@@ -107,11 +109,13 @@ Python API usage::
         bands=[0, 1, 2]  # Export first 3 bands only
     )
 
-Create web visualizations::
+Create PCA visualizations and web maps::
 
-    # Create interactive web map from GeoTIFFs
-    geotessera visualize ./london_tiffs --type web --output ./london_web
-    geotessera serve ./london_web --open
+    # Create PCA mosaic from GeoTIFFs
+    geotessera visualize ./london_tiffs pca_mosaic.tif
+
+    # Create web tiles and serve interactively
+    geotessera webmap pca_mosaic.tif --serve
 
 Architecture Overview
 ---------------------
@@ -245,7 +249,7 @@ Data Organization
 
 Embeddings are organized by:
 
-* **Year**: 2017-2024 (depending on availability)
+* **Year**: 2017-2025 (depending on availability)
 * **Location**: Global 0.1-degree grid system
 * **Format**: NumPy arrays with shape (height, width, 128)
 

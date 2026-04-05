@@ -126,15 +126,17 @@ The progress bar reflects only remaining work.
     - Includes accurate CRS and transform metadata
     - Suitable for GIS software (QGIS, ArcGIS, etc.)
     - Supports compression (lzw, deflate, none)
-    - Files named by tile coordinates (e.g., ``tessera_2024_lat52.05_lon0.15.tif``)
+    - Registry directory structure: ``global_0.1_degree_representation/{year}/grid_{lon}_{lat}/grid_{lon}_{lat}_{year}.tiff``
+    - Supports resume: interrupted downloads skip existing files
 
 **NPY Format** (``--format npy``):
-    - Creates raw numpy arrays (.npy files)
-    - Includes metadata.json with tile information and CRS data
-    - Suitable for direct analysis in Python
-    - Smaller file sizes than GeoTIFF
-    - Files named by coordinates (e.g., ``embedding_52.05_0.15.npy``)
-    - Metadata includes UTM projection information for each tile
+    - Downloads quantized numpy arrays (.npy) with separate scale files and landmask TIFFs
+    - Registry directory structure: ``global_0.1_degree_representation/{year}/grid_{lon}_{lat}/``
+    - Embedding files: ``grid_{lon}_{lat}.npy`` (int8 quantized)
+    - Scale files: ``grid_{lon}_{lat}_scales.npy`` (float32)
+    - Landmask TIFFs: ``global_0.1_degree_tiff_all/grid_{lon}_{lat}.tiff`` (CRS and transform)
+    - Dequantize with: ``embedding = quantized.astype(np.float32) * scales``
+    - Supports resume: interrupted downloads skip existing files
 
 visualize
 ~~~~~~~~~
@@ -310,9 +312,7 @@ Generate a world map showing Tessera embedding coverage.
 
 **Map Options**:
 
-* ``--width INT`` - Figure width in inches (default: 20)
-* ``--height INT`` - Figure height in inches (default: 10)
-* ``--dpi INT`` - Output resolution in dots per inch (default: 100)
+* ``--width INT`` - Output image width in pixels (default: 2000)
 * ``--no-countries`` - Don't show country boundaries
 
 **Examples**::
@@ -334,8 +334,8 @@ Generate a world map showing Tessera embedding coverage.
     geotessera coverage --year 2024
 
     # Customize visualization
-    geotessera coverage --region-file area.geojson --tile-alpha 0.3 --dpi 150
-    geotessera coverage --country "Germany" --tile-alpha 0.3 --dpi 150
+    geotessera coverage --region-file area.geojson --tile-alpha 0.3
+    geotessera coverage --country "Germany" --tile-alpha 0.3
 
 **Multi-Year Color Coding** (default when no specific year requested):
     - **Green**: All available years present for this tile
@@ -468,7 +468,7 @@ Prepare data for GIS software::
     geotessera visualize ./gis_data pca_overview.tif
 
     # 4. Analyze files before importing to GIS
-    geotessera info --geotiffs ./gis_data --verbose
+    geotessera info --tiles ./gis_data --verbose
 
     # Files are now ready for QGIS, ArcGIS, etc.
     # Use pca_overview.tif for quick visual reference
@@ -508,7 +508,7 @@ Common Issues and Solutions
     - Files use native UTM projections (varies by location from landmask tiles)
     - Each tile preserves its original projection for accuracy
     - Most GIS software handles reprojection automatically
-    - Use ``geotessera info --geotiffs`` to check CRS for each tile
+    - Use ``geotessera info --tiles`` to check CRS for each tile
     - Different tiles may have different UTM zones
 
 Getting Help

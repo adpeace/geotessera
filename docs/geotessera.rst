@@ -71,6 +71,55 @@ Visualization utilities for creating maps, web tiles, and interactive visualizat
    :show-inheritance:
    :undoc-members:
 
+.. _geotessera-store:
+
+:mod:`geotessera.store` -- Zarr Store Access
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Cloud-native access to Tessera embeddings via Zarr v3 format, with automatic UTM zone routing, point sampling, and region reading. Implements the ``geoemb:`` convention for geospatial embedding stores.
+
+**Key Features:**
+
+* :class:`~geotessera.store.GeoTesseraZarr` - Cloud-native Zarr store for streaming access without downloads
+* :meth:`~geotessera.store.GeoTesseraZarr.sample_points` - Sample embeddings at specific coordinates
+* :meth:`~geotessera.store.GeoTesseraZarr.read_region` - Read rectangular regions as mosaics
+* :meth:`~geotessera.store.GeoTesseraZarr.open_zone` - Open UTM zone as xarray Dataset
+
+.. automodule:: geotessera.store
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. _geotessera-tiles:
+
+:mod:`geotessera.tiles` -- Tile Abstraction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Format-agnostic tile abstraction supporting both GeoTIFF and NPY format tiles with automatic format detection.
+
+**Key Features:**
+
+* :class:`~geotessera.tiles.Tile` - Format-agnostic embedding tile wrapper
+* :func:`~geotessera.tiles.discover_tiles` - Auto-detect and discover tiles in a directory
+* :func:`~geotessera.tiles.discover_formats` - Discover all available tile formats
+
+.. automodule:: geotessera.tiles
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
+.. _geotessera-tile-transform:
+
+:mod:`geotessera.tile_transform` -- Coordinate Transform
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Piecewise affine coordinate transform for Zarr stores, enabling coordinate-based selection of embedding data.
+
+.. automodule:: geotessera.tile_transform
+   :members:
+   :show-inheritance:
+   :undoc-members:
+
 .. _geotessera-cli:
 
 :mod:`geotessera.cli` -- Command Line Interface

@@ -206,11 +206,10 @@ The registry uses a **Parquet file** for efficient data discovery and querying:
     registry.parquet (single file with all metadata)
     ├── Columns:
     │   ├── lon, lat         # Tile center coordinates
-    │   ├── year             # Data year (2017-2024)
-    │   ├── sha256           # File integrity checksum
-    │   ├── embedding_path   # Path to .npy file
-    │   ├── scales_path      # Path to _scales.npy file
-    │   └── block_info       # Internal 5×5 degree block identifiers
+    │   ├── year             # Data year (2017-2025)
+    │   ├── hash             # SHA256 file integrity checksum
+    │   ├── scales_hash      # SHA256 checksum for scales files
+    │   └── file_size        # File size in bytes
     └── Rows: One per tile
 
 **Querying the Registry**::

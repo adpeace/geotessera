@@ -6,7 +6,7 @@ This guide will get you up and running with GeoTessera quickly.
 Installation
 ------------
 
-Install GeoTessera using pip::
+Requires Python 3.12 or later. Install GeoTessera using pip::
 
     pip install geotessera
 
@@ -58,8 +58,7 @@ You can customize the visualization::
 
     geotessera coverage \
         --region-file area.geojson \
-        --tile-alpha 0.3 \
-        --dpi 150
+        --tile-alpha 0.3
 
 Step 2: Download Embeddings
 ----------------------------

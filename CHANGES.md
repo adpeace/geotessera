@@ -1,4 +1,4 @@
-## v0.8.0 (2026-04-03)
+## v0.8.0 (2026-04-05)
 
 This release adds cloud-native Zarr access, GeoTIFF download improvements,
 and several registry and CLI fixes.
@@ -16,6 +16,17 @@ and several registry and CLI fixes.
   parquet database during registry scans (@avsm)
 - **Truncated NPY detection**: `geotessera-registry check` now detects
   truncated `.npy` files and reports them (@avsm)
+- **`refresh` parameter**: `download_tile` and `export_embedding_geotiff`
+  now expose a `refresh` parameter (default `False`) to force re-download
+  of tiles even when local files exist (@avsm #238, reported in #237)
+
+### Breaking Changes
+
+- **Old Zarr format removed from `download` command**: `--format zarr` is no
+  longer accepted; use `geotessera-registry zarr-init`/`zarr-fill` to
+  build zarr stores and `GeoTesseraZarr` to read them
+- **`visualize` command no longer accepts zarr input**: Only GeoTIFF and
+  NPY format directories are supported
 
 ### Bug Fixes
 

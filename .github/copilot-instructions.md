@@ -6,7 +6,7 @@ GeoTessera is a Python library for accessing and working with Tessera geospatial
 
 ### Core Architecture
 
-- **Two-step workflow**: Retrieve embeddings (numpy arrays) → Export to desired format (GeoTIFF/zarr)
+- **Two-step workflow**: Retrieve embeddings (numpy arrays) → Export to desired format (GeoTIFF/NPY)
 - **Registry system**: Parquet-based metadata registry for efficient tile lookup
 - **0.1-degree grid**: Tiles cover ~11km × 11km, named by center coordinates
 - **Direct HTTP downloads**: On-demand tile fetching with automatic cleanup
@@ -16,7 +16,7 @@ GeoTessera is a Python library for accessing and working with Tessera geospatial
 
 ### Core Dependencies
 
-- **Python**: 3.11, 3.12, or 3.13 required (3.11+ in general)
+- **Python**: 3.12 or 3.13 required (3.12+ due to geozarr-toolkit)
 - **CLI Framework**: `typer` with `rich` for interactive output
 - **Geospatial**: `rasterio`, `geopandas`, `rioxarray` for GIS operations
 - **Data Processing**: `numpy`, `pandas`, `pyarrow` (for Parquet registry)
@@ -50,7 +50,9 @@ geotessera/
 ├── registry.py          # Parquet registry management
 ├── cli.py               # Main CLI commands
 ├── registry_cli.py      # Registry-specific CLI
-├── tiles.py             # Tile operations
+├── store.py             # Zarr v3 store access (GeoTesseraZarr)
+├── tile_transform.py    # Coordinate transforms for Zarr stores
+├── tiles.py             # Tile abstraction (GeoTIFF + NPY)
 ├── visualization.py     # Visualization functions
 ├── web.py              # Web map generation
 ├── country.py          # Country bounding box utilities
@@ -87,7 +89,6 @@ Run command and check output:
 - `tests/cli.t` - CLI command tests
 - `tests/hash.t` - Hash verification tests
 - `tests/viz.t` - Visualization tests
-- `tests/zarr.t` - Zarr format tests
 
 ### Running Tests
 
@@ -142,7 +143,7 @@ ruff format .
 
 - GitHub Actions workflow: `.github/workflows/ci.yml`
 - Multi-platform testing: Ubuntu, macOS (Intel & Apple Silicon)
-- Python versions: 3.11, 3.12, 3.13
+- Python versions: 3.12, 3.13
 - Dependencies: GDAL must be installed before Python packages
 - Tests run with `uv run cram tests -v`
 
