@@ -3314,14 +3314,51 @@ def _parse_int_range(s: str) -> list[int]:
 def _find_registry(
     base_dir: str, registry_dir: Optional[str] = None
 ) -> Tuple[str, str]:
-    """Find the registry directory from base_dir. Returns (base_dir, registry_dir)."""
+    """Find the registry directory from base_dir. Returns (base_dir, registry_dir).
+
+    Looks for either ``manifest.parquet`` (current per-version format) or the
+    legacy ``registry.parquet`` in base_dir and up to 3 parent directories.
+    """
     if registry_dir is None:
         candidate = Path(base_dir)
         for _ in range(3):
+            if (candidate / "manifest.parquet").exists():
+                return base_dir, str(candidate)
             if (candidate / "registry.parquet").exists():
                 return base_dir, str(candidate)
             candidate = candidate.parent
     return base_dir, registry_dir or base_dir
+
+
+def _detect_dataset_metadata(
+    base_dir: str,
+    explicit_version: Optional[str],
+    explicit_variant: Optional[str],
+) -> Tuple[str, str]:
+    """Resolve the (dataset_version, dataset_variant) for a local mirror.
+
+    If the user passes the flags explicitly we honour them; otherwise we look
+    for a ``tessera_metadata.json`` sidecar (written by the CLI download
+    flow) and use what it recorded. Falls back to v1/vultr.
+    """
+    if explicit_version and explicit_variant:
+        return explicit_version, explicit_variant
+
+    import json
+    sidecar = Path(base_dir) / "tessera_metadata.json"
+    if sidecar.exists():
+        try:
+            data = json.loads(sidecar.read_text())
+            version = explicit_version or data.get("dataset_version_path") or data.get(
+                "dataset_version"
+            )
+            variant = explicit_variant or data.get("dataset_variant")
+            if version and variant:
+                return version, variant
+        except (OSError, ValueError):
+            pass
+
+    return explicit_version or "v1", explicit_variant or "vultr"
 
 
 def zarr_init_command(args):
@@ -3334,9 +3371,16 @@ def zarr_init_command(args):
 
     base_dir = args.base_dir
     base_dir, registry_dir = _find_registry(base_dir, args.registry_dir)
+    dataset_version, dataset_variant = _detect_dataset_metadata(
+        base_dir, args.dataset_version, args.dataset_variant
+    )
+    console.print(
+        f"[cyan]Using dataset version={dataset_version}, variant={dataset_variant}[/cyan]"
+    )
 
     registry = Registry(
-        version="v1",
+        version=dataset_version,
+        variant=dataset_variant,
         embeddings_dir=base_dir,
         registry_dir=registry_dir,
     )
@@ -3380,9 +3424,16 @@ def zarr_fill_command(args):
 
     base_dir = args.base_dir
     base_dir, registry_dir = _find_registry(base_dir, args.registry_dir)
+    dataset_version, dataset_variant = _detect_dataset_metadata(
+        base_dir, args.dataset_version, args.dataset_variant
+    )
+    console.print(
+        f"[cyan]Using dataset version={dataset_version}, variant={dataset_variant}[/cyan]"
+    )
 
     registry = Registry(
-        version="v1",
+        version=dataset_version,
+        variant=dataset_variant,
         embeddings_dir=base_dir,
         registry_dir=registry_dir,
     )
@@ -4189,7 +4240,22 @@ Directory Structure:
         "--registry-dir",
         type=str,
         default=None,
-        help="Directory containing registry.parquet (default: auto-detected)",
+        help="Directory containing manifest.parquet / landmasks.parquet "
+        "(default: auto-detected from base_dir and parents)",
+    )
+    zarr_init_parser.add_argument(
+        "--dataset-version",
+        type=str,
+        default=None,
+        help="Tessera dataset version (e.g. v1, v1.1). "
+        "Default: read from tessera_metadata.json in base_dir, else v1.",
+    )
+    zarr_init_parser.add_argument(
+        "--dataset-variant",
+        type=str,
+        default=None,
+        help="Tessera dataset variant (e.g. vultr, cambridge). "
+        "Default: read from tessera_metadata.json in base_dir, else vultr.",
     )
     zarr_init_parser.set_defaults(func=zarr_init_command)
 
@@ -4228,7 +4294,22 @@ Directory Structure:
         "--registry-dir",
         type=str,
         default=None,
-        help="Directory containing registry.parquet (default: auto-detected)",
+        help="Directory containing manifest.parquet / landmasks.parquet "
+        "(default: auto-detected from base_dir and parents)",
+    )
+    zarr_fill_parser.add_argument(
+        "--dataset-version",
+        type=str,
+        default=None,
+        help="Tessera dataset version (e.g. v1, v1.1). "
+        "Default: read from tessera_metadata.json in base_dir, else v1.",
+    )
+    zarr_fill_parser.add_argument(
+        "--dataset-variant",
+        type=str,
+        default=None,
+        help="Tessera dataset variant (e.g. vultr, cambridge). "
+        "Default: read from tessera_metadata.json in base_dir, else vultr.",
     )
     zarr_fill_parser.set_defaults(func=zarr_fill_command)
 

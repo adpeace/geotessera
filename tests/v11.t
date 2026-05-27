@@ -149,7 +149,7 @@ files per tile (embedding + scales + landmask):
   >   --format npy \
   >   --dry-run \
   >   --dataset-version v1.1 \
-  >   --dataset-variant cambridge 2>&1 | grep -oE '(Point \(0\.35, 51\.65\) -> tile grid_0\.35_51\.65|Found [0-9]+ tiles for region in year 2024|Files to download: +[0-9]+|Tiles in region: +[0-9]+)' | sed 's/ \+/ /g'
+  >   --dataset-variant cambridge 2>&1 | grep -oE '(Point \(0\.35, 51\.65\) -> tile grid_0\.35_51\.65|Found [0-9]+ tiles for region in year 2024|Files to download: +[0-9]+|Tiles in region: +[0-9]+)' | tr -s ' '
   Point (0.35, 51.65) -> tile grid_0.35_51.65
   Found 1 tiles for region in year 2024
   Files to download: 3
