@@ -261,20 +261,43 @@ def gather_tile_infos(
     #     <year>/... (what `aws s3 cp --recursive` produces)
     # Prefer the S3-mirror layout when it exists so users who keep a
     # multi-version mirror under one root can point zarr-fill at the top.
+    # Landmasks are STRICTLY per-version — no cross-version fallback. Each
+    # Tessera version has its own landmask grid and mixing them silently
+    # would corrupt water masking.
     emb_candidate = (
         registry._embeddings_dir / registry._version_path / EMBEDDINGS_DIR_NAME
     )
-    lm_candidate = (
+    lm_s3_mirror = (
         registry._embeddings_dir / registry._version_path / LANDMASKS_DIR_NAME
     )
+    lm_flat = registry._embeddings_dir / LANDMASKS_DIR_NAME
+
     if emb_candidate.exists():
         base_emb = str(emb_candidate)
-        base_lm = str(lm_candidate) if lm_candidate.exists() else str(
-            registry._embeddings_dir / LANDMASKS_DIR_NAME
-        )
+        # When embeddings are in S3-mirror layout, landmasks must match.
+        # Don't fall back to the flat layout — that would silently pick up
+        # the wrong version's landmasks.
+        if lm_s3_mirror.exists():
+            base_lm = str(lm_s3_mirror)
+        else:
+            raise FileNotFoundError(
+                f"Landmask directory not found for {registry._version_path}: "
+                f"expected {lm_s3_mirror}. Landmasks are per-version and "
+                f"cannot be reused across versions. Fetch them with:\n"
+                f"  aws s3 sync s3://tessera-embeddings/"
+                f"{registry._version_path}/{LANDMASKS_DIR_NAME}/ {lm_s3_mirror}/"
+            )
     else:
         base_emb = str(registry._embeddings_dir / EMBEDDINGS_DIR_NAME)
-        base_lm = str(registry._embeddings_dir / LANDMASKS_DIR_NAME)
+        if lm_flat.exists():
+            base_lm = str(lm_flat)
+        else:
+            raise FileNotFoundError(
+                f"Landmask directory not found: expected {lm_flat}. "
+                f"Fetch them with:\n"
+                f"  aws s3 sync s3://tessera-embeddings/"
+                f"{registry._version_path}/{LANDMASKS_DIR_NAME}/ {lm_flat}/"
+            )
     zones_dict: Dict[int, List[TileInfo]] = {}
     transformer_cache: Dict[int, ProjTransformer] = {}
     pixel_size = 10.0
@@ -1560,6 +1583,269 @@ def compute_stretch(
 
 
 # ---------------------------------------------------------------------------
+# Global cross-zone stretch (sparsity-aware sampler)
+# ---------------------------------------------------------------------------
+# Independently of `compute_stretch` (which works per-zone), this gives us
+# ONE set of (min, max) percentile bounds derived from a random sample of
+# valid pixels drawn from every UTM zone. Storing the result on the store's
+# root attrs lets `build_global_preview` reuse it across zones and produce
+# a seamless mosaic instead of one stretch per zone.
+
+_GLOBAL_STRETCH_ATTR = "geoemb:stretch"
+
+
+def _sample_shard_task(
+    store_path_str: str,
+    zone_group: str,
+    time_index: int,
+    ci: int,
+    cj: int,
+    band_indices: tuple,
+    max_per_chunk: int,
+) -> Optional[np.ndarray]:
+    """Worker-side: open the zone arrays and return a valid-pixel sample.
+
+    Lives at module level so ProcessPoolExecutor can pickle it.
+    """
+    import zarr
+
+    root = zarr.open_group(store_path_str, mode="r", use_consolidated=False)
+    zone_store = root[zone_group]
+    emb_arr = zone_store["embeddings"]
+    scales_arr = zone_store["scales"]
+    _, _, H, W = emb_arr.shape
+    return _sample_chunk_stats(
+        emb_arr,
+        scales_arr,
+        time_index,
+        ci,
+        cj,
+        SHARD_SIZE,
+        (H, W),
+        band_indices=band_indices,
+        max_per_chunk=max_per_chunk,
+    )
+
+
+def compute_global_stretch(
+    store_path: Path,
+    year: int,
+    target_samples: int = 1_000_000,
+    max_shards: Optional[int] = None,
+    p_low: float = 2.0,
+    p_high: float = 98.0,
+    workers: int = 8,
+    zones: Optional[List[int]] = None,
+    band_indices: Tuple[int, ...] = RGB_PREVIEW_BANDS,
+    max_per_chunk: int = 50_000,
+    console: Optional["rich.console.Console"] = None,
+) -> dict:
+    """Sample valid pixels across every UTM zone until ``target_samples`` are
+    collected, then derive one ``(min, max)`` percentile stretch shared by
+    the whole world.
+
+    Sparsity-aware: the per-shard sampler (``_sample_chunk_stats``) already
+    filters out non-finite scales — both NaN (water) and +inf (land tile
+    with no embedding written yet) — so we count only real, dequantisable
+    pixels toward the target. Shards are visited in a deterministic shuffled
+    order with bounded-batch parallelism; once the target is reached we stop
+    draining the queue. The resulting stretch is persisted to the store
+    root's ``geoemb:stretch`` attribute under the requested year so
+    :func:`build_global_preview` can pick it up.
+
+    Args:
+        store_path: Path to the tessera Zarr store.
+        year: Time slice the stretch applies to.
+        target_samples: Stop after this many valid pixels are collected.
+        max_shards: Optional hard cap on shards visited (default: unbounded,
+            but the shuffled order means we usually hit ``target_samples``
+            in a few hundred shards even on sparse stores).
+        p_low/p_high: Percentile bounds for the stretch (default 2/98).
+        workers: Parallel I/O threads. Sampling is I/O-bound.
+        zones: Optional zone-number filter (e.g. ``[30, 31]``); defaults to
+            every UTM zone present in the store.
+        band_indices: Bands to compute stretch for (default: RGB triple).
+        max_per_chunk: Per-shard cap on sampled pixels.
+        console: Optional Rich console for progress prints.
+
+    Returns:
+        ``{"min": [..], "max": [..], "samples": int}`` — also written to
+        ``<store>/zarr.json``'s ``geoemb:stretch.{year}`` attribute.
+    """
+    import re
+    import zarr
+    from concurrent.futures import ThreadPoolExecutor
+
+    store_path = Path(store_path)
+    root = zarr.open_group(str(store_path), mode="r", use_consolidated=False)
+
+    # Find time_index for the requested year via the first zone's time coord.
+    time_index = None
+    for member_name in sorted(root.keys()):
+        if member_name.startswith("utm"):
+            try:
+                time_arr = root[member_name]["time"][:]
+                years_list = [int(v) for v in time_arr]
+                if year in years_list:
+                    time_index = years_list.index(year)
+                    break
+            except Exception:
+                continue
+    if time_index is None:
+        raise ValueError(f"Year {year} not present in store {store_path}")
+
+    # Enumerate every (zone, ci, cj) shard.
+    zone_pattern = re.compile(r"^utm(\d{2})$")
+    all_shards: List[Tuple[str, int, int]] = []
+    zones_visited = set()
+    for name in sorted(root.keys()):
+        m = zone_pattern.match(name)
+        if not m:
+            continue
+        zone_num = int(m.group(1))
+        if zones is not None and zone_num not in zones:
+            continue
+        try:
+            emb_arr = root[name]["embeddings"]
+            _, _, H, W = emb_arr.shape
+        except (KeyError, ValueError):
+            continue
+        n_rows = math.ceil(H / SHARD_SIZE)
+        n_cols = math.ceil(W / SHARD_SIZE)
+        zones_visited.add(zone_num)
+        for ci in range(n_rows):
+            for cj in range(n_cols):
+                all_shards.append((name, ci, cj))
+
+    if not all_shards:
+        raise RuntimeError(
+            f"No UTM zones with embedding data found in {store_path}"
+        )
+
+    # Deterministic shuffle seeded by year so reruns reproduce.
+    rng = np.random.default_rng(year)
+    rng.shuffle(all_shards)
+    if max_shards is not None:
+        all_shards = all_shards[:max_shards]
+
+    if console:
+        console.print(
+            f"Sampling stretch from {len(zones_visited)} zones, "
+            f"{len(all_shards):,} shards available, target {target_samples:,} "
+            f"valid pixels, workers={workers}"
+        )
+
+    # Process in batches so we can stop early once the target is reached.
+    batch_size = max(workers * 4, 32)
+    collected: List[np.ndarray] = []
+    total_valid = 0
+    shards_visited = 0
+    shards_with_data = 0
+    band_tuple = tuple(band_indices)
+    store_path_str = str(store_path)
+
+    i = 0
+    while total_valid < target_samples and i < len(all_shards):
+        batch = all_shards[i : i + batch_size]
+        i += batch_size
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(
+                    _sample_shard_task,
+                    store_path_str,
+                    zone_group,
+                    time_index,
+                    ci,
+                    cj,
+                    band_tuple,
+                    max_per_chunk,
+                )
+                for (zone_group, ci, cj) in batch
+            ]
+            for fut in futures:
+                vals = fut.result()
+                shards_visited += 1
+                if vals is None or len(vals) == 0:
+                    continue
+                collected.append(vals)
+                shards_with_data += 1
+                total_valid += len(vals)
+        if console:
+            console.print(
+                f"  …{total_valid:,}/{target_samples:,} pixels "
+                f"({shards_with_data}/{shards_visited} shards had data)"
+            )
+
+    if not collected:
+        raise RuntimeError(
+            "No valid pixels found across any shard — is this store filled?"
+        )
+
+    all_vals = np.concatenate(collected, axis=0)
+    if all_vals.shape[0] > target_samples * 2:
+        # Trim oversize (last batch overshot) for a clean percentile.
+        rng2 = np.random.default_rng(year + 1)
+        idx = rng2.choice(all_vals.shape[0], target_samples, replace=False)
+        all_vals = all_vals[idx]
+
+    n_bands = all_vals.shape[1]
+    stretch_min = [float(np.percentile(all_vals[:, k], p_low)) for k in range(n_bands)]
+    stretch_max = [float(np.percentile(all_vals[:, k], p_high)) for k in range(n_bands)]
+    for k in range(n_bands):
+        if stretch_max[k] <= stretch_min[k]:
+            stretch_max[k] = stretch_min[k] + 1.0
+
+    if console:
+        console.print(
+            f"Stretch: min={[f'{v:.3f}' for v in stretch_min]}, "
+            f"max={[f'{v:.3f}' for v in stretch_max]} "
+            f"(from {all_vals.shape[0]:,} pixels)"
+        )
+
+    # Persist to root attrs under year-keyed subdict.
+    root_rw = zarr.open_group(str(store_path), mode="r+", use_consolidated=False)
+    stretch_map = dict(root_rw.attrs.get(_GLOBAL_STRETCH_ATTR, {}))
+    stretch_map[str(year)] = {
+        "min": stretch_min,
+        "max": stretch_max,
+        "p_low": p_low,
+        "p_high": p_high,
+        "samples": int(all_vals.shape[0]),
+        "shards_visited": int(shards_visited),
+        "shards_with_data": int(shards_with_data),
+        "bands": list(band_indices),
+        "method": "global_percentile",
+    }
+    root_rw.attrs[_GLOBAL_STRETCH_ATTR] = stretch_map
+
+    if console:
+        console.print(
+            f"[green]Saved to {_GLOBAL_STRETCH_ATTR}.{year} on store root.[/green]"
+        )
+
+    return {"min": stretch_min, "max": stretch_max, "samples": int(all_vals.shape[0])}
+
+
+def _load_global_stretch(
+    store_path: Path, year: int
+) -> Optional[dict]:
+    """Look up a previously-computed global stretch for ``year``.
+
+    Returns ``{"min": [..], "max": [..]}`` if present, else ``None``.
+    """
+    import zarr
+
+    root = zarr.open_group(str(store_path), mode="r", use_consolidated=False)
+    stretch_map = root.attrs.get(_GLOBAL_STRETCH_ATTR, {})
+    if not isinstance(stretch_map, dict):
+        return None
+    entry = stretch_map.get(str(year))
+    if not entry:
+        return None
+    return {"min": list(entry["min"]), "max": list(entry["max"])}
+
+
+# ---------------------------------------------------------------------------
 # Global RGB preview pyramid
 # ---------------------------------------------------------------------------
 # Reprojects per-zone UTM embeddings into a single EPSG:4326 RGB pyramid,
@@ -2129,32 +2415,52 @@ def build_global_preview(
     # Ensure global pyramid structure exists
     _ensure_global_store(store_path, num_levels)
 
+    # Prefer a pre-computed cross-zone stretch (written by `zarr-stretch`).
+    # Using one shared stretch eliminates inter-zone colour discontinuities.
+    global_stretch = _load_global_stretch(store_path, year)
+    if global_stretch and console:
+        console.print(
+            f"[cyan]Using global stretch from store attrs "
+            f"(min={[f'{v:.3f}' for v in global_stretch['min']]}, "
+            f"max={[f'{v:.3f}' for v in global_stretch['max']]})[/cyan]"
+        )
+    elif console:
+        console.print(
+            "[yellow]No global stretch attribute found. Falling back to "
+            "per-zone stretch — the mosaic may show colour seams. "
+            "Run `geotessera-registry zarr-stretch <store> --year "
+            f"{year}` first for seamless colours.[/yellow]"
+        )
+
     # Reproject each zone and build pyramid
     for zone_num, info in sorted(zone_infos.items()):
         if console:
             console.print(f"\n  Zone {zone_num:02d}:")
 
-        # Compute stretch for this zone+time
-        zone_store = zarr.open_group(
-            str(store_path),
-            mode="r",
-            path=info["zone_group"],
-            zarr_format=3,
-            use_consolidated=False,
-        )
-        if console:
-            console.print("    Sampling stretch...")
-        stretch = compute_stretch(
-            zone_store,
-            time_index,
-            workers=workers,
-            console=console,
-        )
-        if console:
-            console.print(
-                f"    Stretch: min={[f'{v:.3f}' for v in stretch['min']]}, "
-                f"max={[f'{v:.3f}' for v in stretch['max']]}"
+        if global_stretch is not None:
+            stretch = global_stretch
+        else:
+            # Fallback: per-zone stretch (produces seams at zone boundaries).
+            zone_store = zarr.open_group(
+                str(store_path),
+                mode="r",
+                path=info["zone_group"],
+                zarr_format=3,
+                use_consolidated=False,
             )
+            if console:
+                console.print("    Sampling stretch...")
+            stretch = compute_stretch(
+                zone_store,
+                time_index,
+                workers=workers,
+                console=console,
+            )
+            if console:
+                console.print(
+                    f"    Stretch: min={[f'{v:.3f}' for v in stretch['min']]}, "
+                    f"max={[f'{v:.3f}' for v in stretch['max']]}"
+                )
 
         row_start, row_end, col_start, col_end, did_work = _reproject_zone(
             store_path=store_path,

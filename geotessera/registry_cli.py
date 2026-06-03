@@ -3100,27 +3100,21 @@ def s3scan_command(args):
                 written_files.append(lm_out_file)
                 landmask_files_by_version[version_path] = lm_out_file
 
-            # Fall-back: copy the first scanned landmasks.parquet to every
-            # embedding version that didn't have its own landmasks dir on S3.
-            if landmask_files_by_version:
-                import shutil
-
-                source_version_path = sorted(landmask_files_by_version)[0]
-                source_file = landmask_files_by_version[source_version_path]
-                embedding_version_paths = {
-                    _version_path_from_norm(str(v)) for v, _, _, _ in scan_units
-                }
-                for vpath in sorted(
-                    embedding_version_paths - landmask_files_by_version.keys()
-                ):
-                    target = output_dir / vpath / "landmasks.parquet"
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    console.print(
-                        f"[cyan]Reusing {source_version_path}'s landmarks for "
-                        f"{vpath} (copying to {target})[/cyan]"
-                    )
-                    shutil.copy2(source_file, target)
-                    written_files.append(target)
+            # Each dataset version has its own landmasks now — no cross-version
+            # copying. If a version has embeddings but no landmasks dir on S3,
+            # warn rather than silently substituting another version's masks.
+            embedding_version_paths = {
+                _version_path_from_norm(str(v)) for v, _, _, _ in scan_units
+            }
+            missing = sorted(
+                embedding_version_paths - landmask_files_by_version.keys()
+            )
+            for vpath in missing:
+                console.print(
+                    f"[yellow]Warning: {vpath} has embeddings but no "
+                    f"global_0.1_degree_tiff_all/ on S3. No landmasks.parquet "
+                    f"will be written for {vpath}.[/yellow]"
+                )
 
         # Summary grouped by (version, variant)
         from collections import defaultdict
@@ -3475,6 +3469,33 @@ def zarr_global_preview_command(args):
         workers=args.workers,
         console=console,
         force=args.force,
+    )
+
+    return 0
+
+
+def zarr_stretch_command(args):
+    """Compute a global cross-zone RGB stretch and persist it to the store."""
+    import warnings
+    from rich.console import Console
+    from .zarr import compute_global_stretch
+
+    warnings.filterwarnings("ignore", message="Object at .* is not recognized")
+
+    console = Console()
+    store_path = Path(args.store_path)
+    zones = _parse_int_range(args.zones) if args.zones else None
+
+    compute_global_stretch(
+        store_path=store_path,
+        year=args.year,
+        target_samples=args.target_samples,
+        max_shards=args.max_shards,
+        p_low=args.p_low,
+        p_high=args.p_high,
+        workers=args.workers,
+        zones=zones,
+        console=console,
     )
 
     return 0
@@ -4352,6 +4373,61 @@ Directory Structure:
         help="Reprocess zones even if completion markers exist",
     )
     zarr_gp_parser.set_defaults(func=zarr_global_preview_command)
+
+    # Zarr-stretch command
+    zarr_stretch_parser = subparsers.add_parser(
+        "zarr-stretch",
+        help="Compute a single global RGB stretch across all zones and "
+        "store it on the Zarr root so zarr-global-preview can produce a "
+        "seamless mosaic (no per-zone colour discontinuities).",
+    )
+    zarr_stretch_parser.add_argument(
+        "store_path", type=str, help="Path to tessera store"
+    )
+    zarr_stretch_parser.add_argument(
+        "--year",
+        type=int,
+        default=2024,
+        help="Year slice to stretch (default: 2024)",
+    )
+    zarr_stretch_parser.add_argument(
+        "--target-samples",
+        type=int,
+        default=1_000_000,
+        help="Stop after this many valid (non-NaN, non-+inf) pixels are "
+        "collected across all zones (default: 1_000_000)",
+    )
+    zarr_stretch_parser.add_argument(
+        "--max-shards",
+        type=int,
+        default=None,
+        help="Hard cap on shards visited (default: unbounded — usually only "
+        "a few hundred shards are needed for 1M valid pixels)",
+    )
+    zarr_stretch_parser.add_argument(
+        "--p-low",
+        type=float,
+        default=2.0,
+        help="Low percentile (default: 2)",
+    )
+    zarr_stretch_parser.add_argument(
+        "--p-high",
+        type=float,
+        default=98.0,
+        help="High percentile (default: 98)",
+    )
+    zarr_stretch_parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Parallel I/O threads (default: 8)",
+    )
+    zarr_stretch_parser.add_argument(
+        "--zones",
+        default=None,
+        help="Limit to specific UTM zones (e.g. 29-34). Default: all",
+    )
+    zarr_stretch_parser.set_defaults(func=zarr_stretch_command)
 
     # Verify-tile command
     verify_parser = subparsers.add_parser(
