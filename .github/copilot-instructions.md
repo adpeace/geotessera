@@ -51,7 +51,6 @@ geotessera/
 ├── cli.py               # Main CLI commands
 ├── registry_cli.py      # Registry-specific CLI
 ├── store.py             # Zarr v3 store access (GeoTesseraZarr)
-├── tile_transform.py    # Coordinate transforms for Zarr stores
 ├── tiles.py             # Tile abstraction (GeoTIFF + NPY)
 ├── visualization.py     # Visualization functions
 ├── web.py              # Web map generation
