@@ -127,19 +127,6 @@ def open_zone(
         **kwargs,
     )
 
-    # Attach computed piecewise tile transform — reproduces the tile
-    # generation geometry (0.1° WGS84 → UTM projection) to compute
-    # exact per-pixel coordinates without stored metadata.
-    from .tile_transform import TesseraTileTransform
-
-    try:
-        transform = TesseraTileTransform.from_zone_attrs(ds.attrs)
-        idx = xr.indexes.CoordinateTransformIndex(transform)
-        ds = ds.assign_coords(xr.Coordinates.from_xindex(idx))
-        log.debug("Attached TesseraTileTransform for EPSG:%d", transform.epsg)
-    except Exception as exc:
-        log.debug("Could not attach tile transform: %s", exc)
-
     return ds
 
 
