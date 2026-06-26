@@ -108,18 +108,6 @@ Format-agnostic tile abstraction supporting both GeoTIFF and NPY format tiles wi
    :show-inheritance:
    :undoc-members:
 
-.. _geotessera-tile-transform:
-
-:mod:`geotessera.tile_transform` -- Coordinate Transform
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Piecewise affine coordinate transform for Zarr stores, enabling coordinate-based selection of embedding data.
-
-.. automodule:: geotessera.tile_transform
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
 .. _geotessera-cli:
 
 :mod:`geotessera.cli` -- Command Line Interface
